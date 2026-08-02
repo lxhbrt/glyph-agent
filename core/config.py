@@ -18,13 +18,24 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "vau
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs", "actions.jsonl")
 
 # --- Modell-Runtime ---
-# Provider-Auswahl: "ollama" (Standard) oder "mlx" (später).
+# Provider-Auswahl (austauschbar): "ollama" (lokal, Standard) | "openrouter" | "fallback"
+#  - "ollama"     : nur lokales Qwen (offline, kostenlos, DSGVO-sicher)
+#  - "openrouter" : nur Cloud-Modell (kostenpflichtig; nur Tool-Loop-minimierte Ausschnitte)
+#  - "fallback"   : erst OpenRouter, bei Fehler automatisch lokal (Resilienz)
 # Der Modell-Adapter ist austauschbar; die Agenten-/Tool-Architektur bleibt.
 PROVIDER = os.environ.get("HSEQ_PROVIDER", "ollama")
 
 # Ollama läuft lokal auf localhost:11434. Modellname = auswählbar.
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen-solid")
+
+# OpenRouter (optionales Cloud-Modell). Key aus Umgebung/.env — nicht im Code.
+OPENROUTER_URL = os.environ.get("OPENROUTER_URL", "https://openrouter.ai/api/v1")
+OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "deepseek/deepseek-chat")
+
+# Datenschutz-Schranke für Cloud-Anfragen: max. Zeichen, die an ein externes
+# Modell gehen (Tool-Loop kürzt Kontext vor der Übergabe). 0 = unbegrenzt (nicht empfohlen).
+EXTERNAL_MAX_CHARS = int(os.environ.get("EXTERNAL_MAX_CHARS", "4000"))
 
 # Nummerierung für Revisionen: Format "R{laufendeNummer}"
 # Wird pro Datei geführt (Datei-Metadaten in einem Sidecar-JSON im Backup-Ordner).

@@ -19,7 +19,7 @@ Sicherheit:
   - Runden-Limit (Default 4) + Fehler-Kurzschluss
   - Schreib-Tools nur mit confirm-Callback, der im Chat-Flow den Nutzer fragt
 """
-from . import llm, tool_registry, log
+from . import llm, tool_registry, log, config
 
 MAX_ROUNDS = 4
 
@@ -141,7 +141,16 @@ def _fmt_tool_results(tool_results):
             f"[{tr['tool']} args={_json.dumps(tr['args'], ensure_ascii=False)}]\n"
             + _json.dumps(tr['result'], ensure_ascii=False, default=str)
         )
-    return "\n\n".join(parts)
+    body = "\n\n".join(parts)
+
+    # Datenschutz-Schranke: Kürzt Kontext, der an ein Cloud-Modell (OpenRouter)
+    # gehen könnte. Lokales Ollama bleibt ungekürzt (bleibt auf dem Rechner).
+    provider = getattr(llm.get_provider(), "provider_name", "ollama")
+    if provider in ("openrouter", "fallback"):
+        cap = getattr(config, "EXTERNAL_MAX_CHARS", 4000)
+        if cap and len(body) > cap:
+            body = body[:cap] + "\n\n… [Kontext gekürzt von glyph-agent: Datenschutz-Schranke]"
+    return body
 
 
 def _call_llm(messages):

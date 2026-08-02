@@ -9,10 +9,14 @@ und kennt nie die konkrete Klasse. Damit bleibt der Modellaustausch zentral
 from .. import config
 from .ollama import OllamaProvider
 from .mlx import MLXProvider
+from .openrouter import OpenRouterProvider
+from .fallback import FallbackProvider
 
 _PROVIDERS = {
     "ollama": lambda: OllamaProvider(),
     "mlx": lambda: MLXProvider(),
+    "openrouter": lambda: OpenRouterProvider(),
+    "fallback": lambda: FallbackProvider(),
 }
 
 _singleton = None
