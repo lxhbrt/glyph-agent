@@ -28,17 +28,34 @@ HOST = os.environ.get("GLYPH_AGENT_HOST", "127.0.0.1")
 
 
 def _handle_chat(payload):
-    """Verarbeitet eine /chat-Anfrage ohne eingebettete Bestätigung.
-    Schreib-Tools werden über den confirm-Callback nur erlaubt, wenn der
-    Client in der Anfrage eine explizite Freigabe (confirm: {...}) mitschickt.
+    """Verarbeitet eine /chat-Anfrage.
+
+    Modus-Unterscheidung (klar getrennt):
+      - MODE=agent          : Tool-Loop mit Wiki-/Tool-Zugriff (Qwen lokal greift zu,
+                              OpenRouter formuliert; Fallback-Kette).
+      - MODE=openrouter-chat: reine Chat-Oberfläche OHNE Tools/Vault — nur OpenRouter.
     """
     message = (payload or {}).get("message", "")
-    confirm_allow = (payload or {}).get("confirm")  # list of {"tool": "ApplyEdit", "args": {...}} o.ä.
     if not message.strip():
         return {"ok": False, "answer": "Leere Nachricht.", "rounds": 0, "tool_calls": []}
 
+    if getattr(config, "MODE", "agent") == "openrouter-chat":
+        # Reiner OpenRouter-Chat: KEIN Tool-Loop, KEIN Vault, KEINE Tools.
+        from core import llm as _llm
+        system = (
+            "Du bist ein hilfreicher Assistent (glyph-agent, reiner Chat-Modus). "
+            "Du hast KEINEN Zugriff auf Dateien, einen Vault, Tools oder das Internet. "
+            "Antworte nur aus deinem eigenen Wissen."
+        )
+        try:
+            answer = _llm.chat(system, message)
+            return {"ok": True, "answer": answer, "rounds": 1, "tool_calls": [], "chat_mode": "openrouter-chat"}
+        except Exception as e:
+            return {"ok": False, "answer": f"OpenRouter-Chat fehlgeschlagen: {e}", "rounds": 1, "tool_calls": [], "chat_mode": "openrouter-chat"}
+
+    # Agentenmodus: kontrollierter Tool-Loop mit Bestätigung für Schreib-Tools.
+    confirm_allow = (payload or {}).get("confirm")
     def confirm(tool_name, args):
-        # Nur freigeben, wenn der Client es explizit erlaubt hat
         if not isinstance(confirm_allow, list):
             return False
         for c in confirm_allow:
@@ -47,8 +64,7 @@ def _handle_chat(payload):
         return False
 
     result = tool_loop.run(message, confirm=confirm)
-    # Modell-Info anhängen, damit der Client weiß, wer geantwortet hat
-    # (wichtig bei fallback: OpenRouter oder lokal geworden?).
+    # Modell-Info anhängen (wichtig bei fallback: OpenRouter oder lokal geworden?).
     p = llm.get_provider()
     result = {"used_provider": p.provider_name, "used_model": p.model_name, "pending_confirmation": False, **result}
     return result

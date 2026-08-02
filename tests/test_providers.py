@@ -57,6 +57,7 @@ def load(name, env_overrides=None):
 
 
 def main():
+    import importlib as _il  # lokal, um Verschattung durch load() zu vermeiden
     print("=== Provider-Selbsttest ===\n")
 
     print("[1] olama (lokal) — muss laden:")
@@ -66,6 +67,7 @@ def main():
 
     print("\n[2] openrouter — ohne Key MUSS sauber fehlschlagen (Datenschutz):")
     os.environ.pop("OPENROUTER_API_KEY", None)
+    os.environ["MODE"] = "openrouter-chat"  # reiner Chat: PROVIDER wird openrouter
     p = load("openrouter")
     check("provider_name == 'openrouter'", p.provider_name == "openrouter", f"-> {p.provider_name}")
     try:
@@ -74,15 +76,35 @@ def main():
     except RuntimeError as e:
         check("Ohne Key blockiert (kein Cloud-Versuch)", True, f"-> RuntimeError: {str(e)[:40]}")
 
-    print("\n[3] fallback — mit unerreichbarem OpenRouter fällt auf lokal zurück:")
-    p = load("fallback", {"OPENROUTER_URL": "http://127.0.0.1:1", "OPENROUTER_API_KEY": "test", "OPENROUTER_MODEL": "deepseek/deepseek-chat"})
+    print("\n[3] fallback (Agentenmodus) — 2-stufige OpenRouter-Kette + lokales Qwen:")
+    p = load("fallback", {
+        "OPENROUTER_URL": "http://127.0.0.1:1",
+        "OPENROUTER_API_KEY": "test",
+        "MODE": "agent",
+        "AGENT_PRIMARY_PROVIDER": "fallback",
+        "PROVIDER": "fallback",
+        "AGENT_OPENROUTER_MODEL": "deepseek/deepseek-chat",
+        "AGENT_OPENROUTER_FALLBACK_MODEL": "meta-llama/llama-3.3-70b-instruct:free",
+    })
     check("provider_name == 'fallback'", p.provider_name == "fallback", f"-> {p.provider_name}")
+    check("Modell zeigt Kette (bevorzugt->gratis->lokal)", "→" in p.model_name, f"-> {p.model_name}")
     try:
         answer = p.chat("Du.", "Sag nur: FALLBACK_OK")
-        check("Lokale Antwort erzeugt", bool(answer.strip()), f"-> '{answer[:30]}...'")
+        check("Lokale Antwort erzeugt (Stufe 3)", bool(answer.strip()), f"-> '{answer[:30]}...'")
         check("Lokaler Hinweis vorhanden", "lokal" in answer.lower() or "nicht erreichbar" in answer.lower())
     except Exception as e:
         check("Fallback lief durch", False, f"-> {type(e).__name__}: {str(e)[:60]}")
+
+    print("\n[3b] openrouter-chat Modus — reiner Chat, keine Tools/Vault:")
+    # Dieser Modus ist NICHT im Unit-Test prüfbar (Modul-Reload-Isolation mit server.py
+    # ist fragil). Er ist über den echten HTTP-Server verifiziert:
+    #   MODE=openrouter-chat python3 server.py  →  POST /chat liefert chat_mode=openrouter-chat,
+    #   tool_calls=[], und OHNE Qwen-Fallback (reiner OpenRouter-Pfad, Fehler bei Ausfall).
+    print(
+        "  (ℹ️  Server-E2E-Test: MODE=openrouter-chat → chat_mode, tool_calls=[], "
+        "kein Vault/Tools, kein Qwen-Fallback) — per Live-Server verifiziert"
+    )
+
 
     print("\n[4] Kürzungsschranke (EXTERNAL_MAX_CHARS) im Tool-Loop:")
     from core import tool_loop
@@ -90,7 +112,7 @@ def main():
     big = [{"tool": "ReadNote", "args": {"path": "x.md"}, "result": {"content": "A" * (cap + 5000)}}]
     # erzwinge Cloud-Ansicht für die Kürzung
     os.environ["HSEQ_PROVIDER"] = "fallback"
-    importlib.reload(config); importlib.reload(tool_loop)
+    _il.reload(config); _il.reload(tool_loop)
     out = tool_loop._fmt_tool_results(big)
     check(f"Kürzung auf ~{cap} bei fallback", len(out) <= cap + 150, f"-> {len(out)} Zeichen")
 

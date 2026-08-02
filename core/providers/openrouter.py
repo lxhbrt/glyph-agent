@@ -17,15 +17,18 @@ import urllib.request
 
 from . import ModelProvider
 from .. import log as _agent_log
+from .. import config as _cfg
 
 
 class OpenRouterProvider(ModelProvider):
     def __init__(self, url=None, model=None, api_key=None):
         self.url = url or os.environ.get("OPENROUTER_URL", "https://openrouter.ai/api/v1")
         self.api_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
-        self.model = model or os.environ.get(
-            "OPENROUTER_MODEL", "deepseek/deepseek-chat"
-        )
+        # Modell-Default abhängig vom Modus (openrouter-chat vs. agent):
+        default_model = os.environ.get("OPENROUTER_MODEL", "deepseek/deepseek-chat")
+        if getattr(_cfg, "MODE", "agent") == "agent":
+            default_model = os.environ.get("AGENT_OPENROUTER_MODEL", "deepseek/deepseek-chat")
+        self.model = model or default_model
 
     @property
     def provider_name(self):
