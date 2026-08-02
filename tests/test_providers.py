@@ -83,7 +83,7 @@ def main():
         "MODE": "agent",
         "AGENT_PRIMARY_PROVIDER": "fallback",
         "PROVIDER": "fallback",
-        "AGENT_OPENROUTER_MODEL": "openai/gpt-5.6-luna-pro",
+        "AGENT_OPENROUTER_MODEL": "openai/gpt-5.6-luna",
         "AGENT_OPENROUTER_FALLBACK_MODEL": "inclusionai/ling-3.0-flash:free",
     })
     check("provider_name == 'fallback'", p.provider_name == "fallback", f"-> {p.provider_name}")
