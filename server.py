@@ -26,6 +26,48 @@ from core import config, tool_loop, llm
 PORT = int(os.environ.get("GLYPH_AGENT_PORT", "18899"))
 HOST = os.environ.get("GLYPH_AGENT_HOST", "127.0.0.1")
 
+# --- Textanhänge (Stufe 1) ---
+_ATTACH_TEXT_MIMES = {
+    "text/plain", "text/markdown", "text/x-markdown", "text/html", "text/csv",
+    "text/tab-separated-values", "application/json", "application/xml", "text/xml",
+    "text/yaml", "application/yaml", "text/x-log",
+}
+_ATTACH_TEXT_EXTS = {"txt", "md", "markdown", "csv", "json", "xml", "yaml", "yml", "log", "html"}
+_ATTACH_MAX_CHARS = 2 * 1024 * 1024  # pro Anhang
+
+
+def _embed_attachments(message, attachments):
+    """Bettet Textanhänge sicher in die Nachricht ein (rückwärtskompatibel).
+    Nur Text-MIMEs/ext; Binär/Bild wird NICHT eingepackt (nur Hinweis).
+    Liefert die (ggf. erweiterte) message."""
+    import os
+    if not attachments:
+        return message or ""
+    parts = [message] if (message and message.strip()) else []
+    skipped = []
+    for att in attachments or []:
+        if not isinstance(att, dict):
+            continue
+        name = att.get("name") or "datei"
+        # Dateiname escapen (nur Basisname, keine Kontrollzeichen)
+        name = os.path.basename(str(name)).replace("\x00", "")[:200] or "datei"
+        mime = str(att.get("mime") or "").lower()
+        content = att.get("content") or ""
+        ext = name.lower().rsplit(".", 1)[-1] if "." in name else ""
+        is_text = mime in _ATTACH_TEXT_MIMES or (not mime and ext in _ATTACH_TEXT_EXTS) or (mime == "application/octet-stream" and ext in _ATTACH_TEXT_EXTS)
+        if not is_text:
+            skipped.append(f"{name} (kein erlaubter Text-Typ: {mime or 'unbekannt'})")
+            continue
+        if not str(content).strip():
+            skipped.append(f"{name} (leer)")
+            continue
+        if len(str(content)) > _ATTACH_MAX_CHARS:
+            raise ValueError(f"Textanhang zu groß: {name} (> {_ATTACH_MAX_CHARS} Zeichen)")
+        parts.append(f"[Anhang: {name}]\n{content}\n[Ende Anhang: {name}]")
+    if skipped:
+        parts.append("[Übergangen (Stufe 1): " + "; ".join(skipped) + "]")
+    return "\n\n".join(parts) if parts else (message or "")
+
 
 def _handle_chat(payload):
     """Verarbeitet eine /chat-Anfrage.
@@ -34,8 +76,15 @@ def _handle_chat(payload):
       - MODE=agent          : Tool-Loop mit Wiki-/Tool-Zugriff (Qwen lokal greift zu,
                               OpenRouter formuliert; Fallback-Kette).
       - MODE=openrouter-chat: reine Chat-Oberfläche OHNE Tools/Vault — nur OpenRouter.
+
+    Optionales Feld "attachments": [{name, mime, content}, ...] (Textanhänge aus dem
+    ACP-Adapter, Stufe 1). Rückwärtskompatibel — fehlt das Feld, bleibt alles wie bisher.
     """
     message = (payload or {}).get("message", "")
+    attachments = (payload or {}).get("attachments")
+    # Textanhänge in die Nachricht einbetten (deutlich gekennzeichnet),
+    # damit das Modell den Inhalt als Kontext bekommt.
+    message = _embed_attachments(message, attachments)
     if not message.strip():
         return {"ok": False, "answer": "Leere Nachricht.", "rounds": 0, "tool_calls": []}
 
