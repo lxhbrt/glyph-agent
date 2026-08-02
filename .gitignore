@@ -1,0 +1,16 @@
+# --- Privatheit: nie Vault-Inhalte oder Logs versionieren ---
+vault/backups/
+vault/
+logs/
+*.jsonl
+
+# --- Python ---
+__pycache__/
+*.pyc
+
+# --- Umgebung/Secrets (nie einchecken) ---
+.env
+.env.local
+
+# --- Editor/OS ---
+.DS_Store
