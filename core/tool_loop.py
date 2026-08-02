@@ -24,7 +24,7 @@ from . import llm, tool_registry, log, config
 MAX_ROUNDS = 4
 
 
-def _build_trace(tool_calls, fallback_used=False):
+def _build_trace(tool_calls, tool_results=None, fallback_used=False):
     """Erzeugt einen Diagnose-Trace (sichtbarer Provider/Modell/Tool-Status).
     Wird an jede run()-Antwort angehängt (Punkt: sichtbare Diagnose)."""
     try:
@@ -34,14 +34,19 @@ def _build_trace(tool_calls, fallback_used=False):
     except Exception:
         pname = "?"
         mname = "?"
+    # Ergebnis-Längen aus tool_results (volles Ergebnis), nicht aus tool_calls (nur meta).
+    result_by_tool = {}
+    for tr in tool_results or []:
+        result_by_tool[tr.get("tool")] = tr.get("result") or {}
     tool_calls_meta = []
     for tc in tool_calls or []:
-        result = tc.get("result") or {}
+        result = result_by_tool.get(tc.get("tool")) or {}
         ok = bool(tc.get("ok"))
         rlen = 0
-        if result.get("result") is not None:
+        payload = result.get("result")
+        if payload is not None:
             try:
-                rlen = len(str(result["result"]))
+                rlen = len(str(payload))
             except Exception:
                 rlen = 0
         tool_calls_meta.append({
@@ -133,9 +138,9 @@ def run(user_message, system_extra=None, confirm=None, max_rounds=MAX_ROUNDS):
                     + "\n\nFormuliere deine finale Antwort ausschließlich aus diesen Tool-Ergebnissen.",
                 )
                 log.log("agent_final", rounds=rounds, chars=len(final))
-                return {"answer": final, "rounds": rounds, "tool_calls": tool_calls, "ok": True, "trace": _build_trace(tool_calls)}
+                return {"answer": final, "rounds": rounds, "tool_calls": tool_calls, "ok": True, "trace": _build_trace(tool_calls, tool_results)}
             log.log("agent_reply", rounds=rounds, direct=True)
-            return {"answer": reply, "rounds": rounds, "tool_calls": tool_calls, "ok": True, "trace": _build_trace(tool_calls)}
+            return {"answer": reply, "rounds": rounds, "tool_calls": tool_calls, "ok": True, "trace": _build_trace(tool_calls, tool_results)}
 
         tool_name, args = parsed
 
@@ -165,10 +170,10 @@ def run(user_message, system_extra=None, confirm=None, max_rounds=MAX_ROUNDS):
                 f"Ursprüngliche Frage: {user_message}\n\n" + _fmt_tool_results(tool_results)
                 + "\n\nEin Tool meldete einen Fehler. Erkläre knapp, was passiert ist und was fehlt.",
             )
-            return {"answer": final, "rounds": rounds, "tool_calls": tool_calls, "ok": False, "trace": _build_trace(tool_calls)}
+            return {"answer": final, "rounds": rounds, "tool_calls": tool_calls, "ok": False, "trace": _build_trace(tool_calls, tool_results)}
 
     return {"answer": "Zu viele Tool-Runden — gestoppt (Schleifenschutz).",
-            "rounds": rounds, "tool_calls": tool_calls, "ok": False, "trace": _build_trace(tool_calls)}
+            "rounds": rounds, "tool_calls": tool_calls, "ok": False, "trace": _build_trace(tool_calls, tool_results)}
 
 
 def _fmt_tool_results(tool_results):
