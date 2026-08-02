@@ -46,7 +46,12 @@ def _handle_chat(payload):
                 return True
         return False
 
-    return tool_loop.run(message, confirm=confirm)
+    result = tool_loop.run(message, confirm=confirm)
+    # Modell-Info anhängen, damit der Client weiß, wer geantwortet hat
+    # (wichtig bei fallback: OpenRouter oder lokal geworden?).
+    p = llm.get_provider()
+    result = {"used_provider": p.provider_name, "used_model": p.model_name, "pending_confirmation": False, **result}
+    return result
 
 
 def _handle_health():

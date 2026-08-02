@@ -37,6 +37,17 @@ OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "deepseek/deepseek-chat")
 # Modell gehen (Tool-Loop kürzt Kontext vor der Übergabe). 0 = unbegrenzt (nicht empfohlen).
 EXTERNAL_MAX_CHARS = int(os.environ.get("EXTERNAL_MAX_CHARS", "4000"))
 
+# Geschützte Ordner(namen) im Vault — werden von SUCHEN/LESEN/EDITIEREN ausgeschlossen.
+# Ordner, die „private/privats/secrets/health“ usw. heißen oder enthalten, bleiben lokal tabu für den Agenten.
+BLOCKED_DIRS = [
+    d.lower().strip()
+    for d in os.environ.get(
+        "BLOCKED_DIRS",
+        "private,privat,secrets,health,geheim,persönlich,personenbezogen",
+    ).split(",")
+    if d.strip()
+]
+
 # Nummerierung für Revisionen: Format "R{laufendeNummer}"
 # Wird pro Datei geführt (Datei-Metadaten in einem Sidecar-JSON im Backup-Ordner).
 

@@ -12,9 +12,11 @@ Key: OPENROUTER_API_KEY aus der Umgebung (glyph-agent/.env), nicht im Code.
 """
 import json
 import os
+import time
 import urllib.request
 
 from . import ModelProvider
+from .. import log as _agent_log
 
 
 class OpenRouterProvider(ModelProvider):
@@ -42,6 +44,15 @@ class OpenRouterProvider(ModelProvider):
 
     def _chat_completion(self, messages, temperature, timeout=60):
         self._ensure_key()
+        # Protokollieren, was an die Cloud geht (Datenschutz-Audit).
+        total_chars = sum(len(m.get("content", "")) for m in messages)
+        _agent_log.log(
+            "cloud_send",
+            provider=self.provider_name,
+            model=self.model,
+            chars=total_chars,
+            n_messages=len(messages),
+        )
         payload = {
             "model": self.model,
             "messages": messages,

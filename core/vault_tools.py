@@ -51,6 +51,19 @@ def _safe_md_name(path):
     return path
 
 
+def _is_blocked(relpath):
+    """True, wenn der Pfad in einen geschützten Ordner zeigt (case-insensitiv).
+    Matching ist tolerant: Blocklist-Stichwort wird als Teilstring gegen den
+    Ordnernamen geprüft (z. B. 'privat' trifft 'Privat', 'private', 'Privates')."""
+    parts = relpath.replace(os.sep, "/").lower().split("/")
+    blocked = [b.lower().strip() for b in (getattr(config, "BLOCKED_DIRS", []) or []) if b.strip()]
+    for p in parts:
+        for b in blocked:
+            if b and (b in p or p in b):
+                return True
+    return False
+
+
 # --- Lesen / Suchen ---
 
 def search_vault(query, limit=20):
@@ -66,6 +79,8 @@ def search_vault(query, limit=20):
         if any(seg.startswith(".") for seg in relroot.split(os.sep)):
             continue
         if "backups" in relroot.split(os.sep):
+            continue
+        if _is_blocked(relroot):
             continue
         for fn in files:
             if not fn.endswith(".md"):
@@ -90,11 +105,13 @@ def read_note(path):
     resolved = _resolve_vault_path(path)
     if not resolved or not resolved.endswith(".md"):
         raise ValueError(f"Ungültiger oder unsicherer Pfad: {path}")
+    rel = os.path.relpath(resolved, config.VAULT_PATH)
+    if _is_blocked(rel):
+        raise PermissionError(f"Geschützter Ordner — Zugriff verweigert: {rel}")
     if not os.path.isfile(resolved):
         raise FileNotFoundError(f"Notiz nicht gefunden: {path}")
     with open(resolved, encoding="utf-8", errors="replace") as f:
         content = f.read()
-    rel = os.path.relpath(resolved, config.VAULT_PATH)
     log.log("read_note", path=rel, chars=len(content))
     return {"path": rel, "content": content, "chars": len(content)}
 
