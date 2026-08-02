@@ -55,8 +55,20 @@ TOOLS = [
     },
     {
         "name": "WebSearch",
-        "description": "Kontrollierte Web-Recherche (Exa). NUR anonymisierte Suchbegriffe senden.",
-        "args": {"query": "str, anonymisierter Suchbegriff", "count": "int (optional)"},
+        "description": "Kontrollierte Web-Recherche via Exa oder TinyFish. NUR anonymisierte Suchbegriffe senden.",
+        "args": {"query": "str, anonymisierter Suchbegriff", "count": "int (optional)", "source": "str (optional: 'exa' oder 'tinyfish')"},
+        "write": False,
+    },
+    {
+        "name": "ExtractUrl",
+        "description": "Besucht eine URL und extrahiert gezielt strukturierte Daten als JSON (TinyFish). NUR öffentliche URLs.",
+        "args": {"url": "str", "goal": "str, was extrahiert werden soll (mit JSON-Schema)"},
+        "write": False,
+    },
+    {
+        "name": "FetchUrl",
+        "description": "Holt den Inhalt einer öffentlichen URL als Markdown/Text (TinyFish).",
+        "args": {"url": "str"},
         "write": False,
     },
 ]
@@ -153,7 +165,17 @@ def execute(tool_name, args, confirm=None):
             res = vault_tools.apply_edit(args.get("path"), args.get("new_content", ""))
             return {"ok": True, "result": res}
         if tool_name == "WebSearch":
-            res = web.search_web(args.get("query", ""), count=int(args.get("count", 5)))
+            res = web.web_search(
+                args.get("query", ""),
+                count=int(args.get("count", 5)),
+                source=args.get("source", "exa"),
+            )
+            return {"ok": True, "result": res}
+        if tool_name == "ExtractUrl":
+            res = web.extract_tinyfish(args.get("url", ""), args.get("goal", ""))
+            return {"ok": True, "result": res}
+        if tool_name == "FetchUrl":
+            res = web.fetch_tinyfish(args.get("url", ""), "markdown")
             return {"ok": True, "result": res}
     except Exception as e:
         return {"ok": False, "result": None, "error": str(e)}
