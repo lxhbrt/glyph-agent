@@ -60,8 +60,32 @@ def _build_trace(tool_calls, tool_results=None, fallback_used=False):
         "model": mname,
         "fallback_used": fallback_used,
         "tool_calls": tool_calls_meta,
-        "request_id": None,  # Provider-spezifisch; wird bei Bedarf aus Audit gefüllt
+        "retrieval": _build_retrieval_trace(tool_results),
+        "request_id": "local",  # lokale Verarbeitung: keine externe Request-ID verfügbar
     }
+
+
+def _build_retrieval_trace(tool_results):
+    """Extrahiert aus VaultRecall-Tool-Ergebnissen einen kompakten retrieval-Block.
+    WebSearch bleibt davon getrennt (nur unter tool_calls). Liefert dict|None."""
+    if not tool_results:
+        return None
+    for tr in tool_results:
+        if tr.get("tool") != "VaultRecall":
+            continue
+        res = (tr.get("result") or {}).get("result") or {}
+        return {
+            "type": "vault",
+            "status": res.get("status"),
+            "query": res.get("query"),
+            "candidates": res.get("candidates"),
+            "selected": res.get("selected"),
+            "threshold": res.get("threshold"),
+            "sources": res.get("sources") or [],
+            "top_k": res.get("top_k"),
+            "error": res.get("error"),
+        }
+    return None
 
 # Basis-System-Prompt (identisch mit agent.SYSTEM_PROMPT, Bezug auf Tool-Schema)
 _ROLE = (

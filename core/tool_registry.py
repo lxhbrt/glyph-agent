@@ -12,7 +12,7 @@ Sicherheitsprinzipien:
   - Schreibende Tools sind MARKIERT (write=True) und brauchen im Chat-Flow
     eine Bestätigung, bevor sie ausgeführt werden.
 """
-from . import vault_tools, web
+from . import vault_tools, web, retrieval
 
 # --- Tool-Schema (wird auch dem Modell im System-Prompt beschrieben) ---
 
@@ -52,6 +52,12 @@ TOOLS = [
         "description": "Wendet eine BESTÄTIGTE Änderung an (Backup + Revision). Nur nach Nutzer-Bestätigung.",
         "args": {"path": "str", "new_content": "str, kompletter neuer Inhalt"},
         "write": True,
+    },
+    {
+        "name": "VaultRecall",
+        "description": "Semantische Suche im Obsidian-Vault (lokale Embeddings). NUR Vault-Daten, KEINE Web-Recherche.",
+        "args": {"query": "str", "top_k": "int (optional)", "min_score": "float (optional)"},
+        "write": False,
     },
     {
         "name": "WebSearch",
@@ -171,6 +177,13 @@ def execute(tool_name, args, confirm=None):
             return {"ok": True, "result": prop}
         if tool_name == "ApplyEdit":
             res = vault_tools.apply_edit(args.get("path"), args.get("new_content", ""))
+            return {"ok": True, "result": res}
+        if tool_name == "VaultRecall":
+            res = retrieval.search(
+                args.get("query", ""),
+                top_k=int(args.get("top_k", 4)),
+                min_score=float(args.get("min_score", 0.6)),
+            )
             return {"ok": True, "result": res}
         if tool_name == "WebSearch":
             res = web.web_search(
