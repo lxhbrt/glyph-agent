@@ -141,10 +141,10 @@ Alle Werte in `core/config.py` bzw. per Umgebungsvariable/`.env` (siehe auch `.e
 |----------|---------|-----------|
 | `MODE` | `agent` | `agent` (Agentenmodus) \| `openrouter-chat` (reiner Chat) |
 | `AGENT_PRIMARY_PROVIDER` | `ollama` | Innerhalb Agentenmodus: `ollama` (lokal) \| `openrouter` (Cloud) |
-| `AGENT_OPENROUTER_MODEL` | `deepseek/deepseek-chat` | Bevorzugtes Cloud-Modell im Agentenmodus |
+| `AGENT_OPENROUTER_MODEL` | `openai/gpt-5.6-luna-pro` | Bevorzugtes Cloud-Modell im Agentenmodus (konsistent zu Glyph) |
 | `AGENT_OPENROUTER_FALLBACK_MODEL` | `inclusionai/ling-3.0-flash:free` | Kostenloses OpenRouter-Modell (Stufe 2) |
 | `AGENT_LOCAL_FALLBACK_PROVIDER` | `ollama` | Lokales Qwen (Stufe 3, nur Agentenmodus) |
-| `OPENROUTER_MODEL` | `deepseek/deepseek-chat` | Modell im `openrouter-chat`-Modus |
+| `OPENROUTER_MODEL` | `openai/gpt-5.6-luna-pro` | Modell im `openrouter-chat`-Modus |
 | `OPENROUTER_FALLBACK_MODEL` | `inclusionai/ling-3.0-flash:free` | Kostenloses Modell im `openrouter-chat` |
 | `OPENROUTER_ALLOW_TOOLS` | `false` | Tools im Chat-Modus (nicht empfohlen) |
 | `OPENROUTER_ALLOW_VAULT` | `false` | Vault im Chat-Modus (nicht empfohlen) |
@@ -158,7 +158,7 @@ Alle Werte in `core/config.py` bzw. per Umgebungsvariable/`.env` (siehe auch `.e
 ```env
 MODE=agent
 AGENT_PRIMARY_PROVIDER=openrouter
-AGENT_OPENROUTER_MODEL=deepseek/deepseek-chat
+AGENT_OPENROUTER_MODEL=openai/gpt-5.6-luna-pro
 AGENT_OPENROUTER_FALLBACK_MODEL=inclusionai/ling-3.0-flash:free
 AGENT_LOCAL_FALLBACK_PROVIDER=ollama
 OPENROUTER_API_KEY=sk-or-…

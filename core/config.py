@@ -30,7 +30,8 @@ MODE = os.environ.get("MODE", "agent").lower()
 # AGENT_PRIMARY_PROVIDER: "openrouter" (bevorzugt) | "ollama" (lokal, kein Cloud-Versuch)
 AGENT_PRIMARY_PROVIDER = os.environ.get("AGENT_PRIMARY_PROVIDER", "ollama")
 # Bevorzugtes OpenRouter-Modell für den Agentenmodus.
-AGENT_OPENROUTER_MODEL = os.environ.get("AGENT_OPENROUTER_MODEL", "deepseek/deepseek-chat")
+# Konsistent zu Glyph: openai/gpt-5.6-luna-pro („Luna max“, gleicher Preis wie deepseek).
+AGENT_OPENROUTER_MODEL = os.environ.get("AGENT_OPENROUTER_MODEL", "openai/gpt-5.6-luna-pro")
 # Kostenloses OpenRouter-Fallback-Modell (Modellwechsel INNERHALB von OpenRouter).
 # Verifizierte, real existierende :free-ID (via OpenRouter /models):
 AGENT_OPENROUTER_FALLBACK_MODEL = os.environ.get("AGENT_OPENROUTER_FALLBACK_MODEL", "inclusionai/ling-3.0-flash:free")
@@ -38,7 +39,7 @@ AGENT_OPENROUTER_FALLBACK_MODEL = os.environ.get("AGENT_OPENROUTER_FALLBACK_MODE
 AGENT_LOCAL_FALLBACK_PROVIDER = os.environ.get("AGENT_LOCAL_FALLBACK_PROVIDER", "ollama")
 
 # --- OpenRouter-Chat-Modus (MODE=openrouter-chat) ---
-OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "deepseek/deepseek-chat")
+OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "openai/gpt-5.6-luna-pro")
 OPENROUTER_FALLBACK_MODEL = os.environ.get("OPENROUTER_FALLBACK_MODEL", "inclusionai/ling-3.0-flash:free")
 # Im OpenRouter-Chat-Modus sind Tools/Vault IMMER deaktiviert (sichere Defaults, überschreibbar
 # nur, falls du es bewusst anders willst — nicht empfohlen):
