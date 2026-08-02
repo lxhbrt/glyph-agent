@@ -25,9 +25,10 @@ class OpenRouterProvider(ModelProvider):
         self.url = url or os.environ.get("OPENROUTER_URL", "https://openrouter.ai/api/v1")
         self.api_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
         # Modell-Default abhängig vom Modus (openrouter-chat vs. agent):
-        default_model = os.environ.get("OPENROUTER_MODEL", "deepseek/deepseek-chat")
+        # Fallback in BEIDEN Zweigen = openai/gpt-5.6-luna (abgestimmtes Primärmodell).
+        default_model = os.environ.get("OPENROUTER_MODEL", "openai/gpt-5.6-luna")
         if getattr(_cfg, "MODE", "agent") == "agent":
-            default_model = os.environ.get("AGENT_OPENROUTER_MODEL", "deepseek/deepseek-chat")
+            default_model = os.environ.get("AGENT_OPENROUTER_MODEL", "openai/gpt-5.6-luna")
         self.model = model or default_model
 
     @property
