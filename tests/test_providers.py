@@ -84,7 +84,7 @@ def main():
         "AGENT_PRIMARY_PROVIDER": "fallback",
         "PROVIDER": "fallback",
         "AGENT_OPENROUTER_MODEL": "deepseek/deepseek-chat",
-        "AGENT_OPENROUTER_FALLBACK_MODEL": "meta-llama/llama-3.3-70b-instruct:free",
+        "AGENT_OPENROUTER_FALLBACK_MODEL": "inclusionai/ling-3.0-flash:free",
     })
     check("provider_name == 'fallback'", p.provider_name == "fallback", f"-> {p.provider_name}")
     check("Modell zeigt Kette (bevorzugt->gratis->lokal)", "→" in p.model_name, f"-> {p.model_name}")

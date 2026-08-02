@@ -32,13 +32,14 @@ AGENT_PRIMARY_PROVIDER = os.environ.get("AGENT_PRIMARY_PROVIDER", "ollama")
 # Bevorzugtes OpenRouter-Modell für den Agentenmodus.
 AGENT_OPENROUTER_MODEL = os.environ.get("AGENT_OPENROUTER_MODEL", "deepseek/deepseek-chat")
 # Kostenloses OpenRouter-Fallback-Modell (Modellwechsel INNERHALB von OpenRouter).
-AGENT_OPENROUTER_FALLBACK_MODEL = os.environ.get("AGENT_OPENROUTER_FALLBACK_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
+# Verifizierte, real existierende :free-ID (via OpenRouter /models):
+AGENT_OPENROUTER_FALLBACK_MODEL = os.environ.get("AGENT_OPENROUTER_FALLBACK_MODEL", "inclusionai/ling-3.0-flash:free")
 # Lokaler Fallback (nur Agentenmodus): wenn OpenRouter insgesamt ausfällt -> lokales Modell.
 AGENT_LOCAL_FALLBACK_PROVIDER = os.environ.get("AGENT_LOCAL_FALLBACK_PROVIDER", "ollama")
 
 # --- OpenRouter-Chat-Modus (MODE=openrouter-chat) ---
 OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "deepseek/deepseek-chat")
-OPENROUTER_FALLBACK_MODEL = os.environ.get("OPENROUTER_FALLBACK_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
+OPENROUTER_FALLBACK_MODEL = os.environ.get("OPENROUTER_FALLBACK_MODEL", "inclusionai/ling-3.0-flash:free")
 # Im OpenRouter-Chat-Modus sind Tools/Vault IMMER deaktiviert (sichere Defaults, überschreibbar
 # nur, falls du es bewusst anders willst — nicht empfohlen):
 OPENROUTER_ALLOW_TOOLS = os.environ.get("OPENROUTER_ALLOW_TOOLS", "false").lower() == "true"
