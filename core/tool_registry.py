@@ -91,30 +91,38 @@ def try_parse_tool_call(text):
     """
     Versucht, aus der Modell-Antwort einen Tool-Call zu extrahieren.
     Liefert (tool_name, args) oder None, wenn es keine Tool-Anfrage ist.
-    Tolerant gegenüber Markdown-Codeblöcken und führendem/folgendem Text.
+    Robust für EINEN oder MEHRERE verschachtelte JSON-Blöcke (gpt-5.6-luna sendet
+    teils mehrere WebSearch-Blöcke; Qwen einen einzelnen). Gibt den ERSTEN gültigen
+    Tool-Call zurück. Nutzt raw_decode, um verschachtelte Objekte korrekt zu parsen.
     """
     import json
     import re
 
     s = text.strip()
-    # Codeblock entfernen, falls vorhanden
-    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", s, re.DOTALL)
-    if m:
-        s = m.group(1)
-    else:
-        # sonst: erstes {...}-Objekt suchen
-        m = re.search(r"\{.*\}", s, re.DOTALL)
-        if m:
-            s = m.group(0)
-    try:
-        d = json.loads(s)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(d, dict) or "tool" not in d:
-        return None
-    name = str(d.get("tool"))
-    args = d.get("args") or {}
-    return (name, args)
+    # Markdown-Codeblock entfernen, falls die ganze Antwort einer ist
+    cm = re.search(r"```(?:json)?\s*(.*?)\s*```", s, re.DOTALL)
+    if cm:
+        s = cm.group(1)
+
+    decoder = json.JSONDecoder()
+    idx = 0
+    n = len(s)
+    while idx < n:
+        c = s[idx]
+        if c != "{":
+            idx += 1
+            continue
+        try:
+            obj, end = decoder.raw_decode(s, idx)
+        except json.JSONDecodeError:
+            idx += 1
+            continue
+        if isinstance(obj, dict) and "tool" in obj:
+            name = str(obj.get("tool"))
+            args = obj.get("args") or {}
+            return (name, args)
+        idx = end
+    return None
 
 
 def execute(tool_name, args, confirm=None):
