@@ -23,6 +23,9 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core import config, vault_tools, agent
+from core import dotenv
+
+dotenv.load_dotenv()  # optionale .env laden (EXA_API_KEY etc.), Umgebung gewinnt
 
 USAGE = __doc__
 
