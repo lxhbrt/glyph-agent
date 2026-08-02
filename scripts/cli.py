@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-hseq-agent — einfache lokale Oberfläche (Kommandozeile).
+glyph-agent — einfache lokale Oberfläche (Kommandozeile).
 
 Persönlicher Assistent für den Obsidian-Vault. Läuft komplett lokal
 über Ollama (Qwen). Keine OpenClaw-, keine Netzwerk-Abhängigkeit außer der

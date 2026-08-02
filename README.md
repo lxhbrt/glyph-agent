@@ -1,4 +1,4 @@
-# hseq-agent — persönlicher lokaler Obsidian-Assistent
+# glyph-agent — persönlicher lokaler Obsidian-Assistent
 
 Ein schlanker, **komplett lokaler** Assistent, der mit deinem Obsidian-Vault
 arbeitet. Läuft über **Ollama** (lokales Qwen-Modell) — **ohne OpenClaw, ohne
@@ -71,7 +71,7 @@ python3 -m scripts.cli web "TRGS 510 Aktuelle Anforderungen"
 ## Projektstruktur
 
 ```
-hseq-agent/
+glyph-agent/
 ├── core/
 │   ├── config.py        # zentrale Konfiguration (Vault-Pfad, Modell)
 │   ├── log.py           # Aktions-Protokoll (JSON-Lines)

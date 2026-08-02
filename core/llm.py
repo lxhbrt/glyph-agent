@@ -1,61 +1,31 @@
 # -*- coding: utf-8 -*-
 """
-Lokales LLM-Interface — spricht mit Ollama (lokales Qwen-Modell).
+Modelldienst — schmale Brücke auf die ModelProvider-Schnittstelle.
 
-Hält alle Modellaufrufe an EINER Stelle (Architektur-Regel: nicht überall
-direkt einbauen). Nur stdlib urllib — keine externen Abhängigkeiten.
+WICHTIG (Architektur): agent.py und die CLI rufen NUR diese Funktionen auf,
+nie direkt einen Provider. Dadurch bleibt das Modell austauschbar, ohne dass
+an der Agenten-/Tool-Schicht etwas geändert wird:
+
+    core/llm.chat() / core/llm.generate()
+        -> providers.get_provider()  (Ollama heute, MLX später, ...)
+            -> konkretes Modell
+
+Die tatsächliche Provider-Implementierung liegt in core/providers/*.
+Diese Datei darf KEINE provider-spezifische Logik enthalten.
 """
-import json
-import urllib.request
+from .providers import factory
 
-from . import config
+
+def get_provider():
+    """Liefert den aktiven ModelProvider (für Logs/UI-Info)."""
+    return factory.get_provider()
 
 
 def chat(system, user, temperature=0.3, num_ctx=8192):
-    """
-    Einfacher Chat-Aufruf an das lokale Ollama-Modell.
-    Liefert den reinen Antworttext (str) zurück.
-    """
-    payload = {
-        "model": config.OLLAMA_MODEL,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        "stream": False,
-        "options": {
-            "temperature": temperature,
-            "num_ctx": num_ctx,
-        },
-    }
-    req = urllib.request.Request(
-        f"{config.OLLAMA_URL}/api/chat",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=300) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    return data.get("message", {}).get("content", "").strip()
+    """Chat-Aufruf an den aktiven Provider. Liefert Antworttext (str)."""
+    return factory.get_provider().chat(system, user, temperature, num_ctx)
 
 
 def generate(prompt, temperature=0.3, num_ctx=8192):
-    """
-    Einfacher generate-Aufruf (ohne Chat-Verlauf) — für Einzel-Tasks.
-    Liefert Antworttext zurück.
-    """
-    payload = {
-        "model": config.OLLAMA_MODEL,
-        "prompt": prompt,
-        "stream": False,
-        "options": {"temperature": temperature, "num_ctx": num_ctx},
-    }
-    req = urllib.request.Request(
-        f"{config.OLLAMA_URL}/api/generate",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=300) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    return data.get("response", "").strip()
+    """Freier Generierungs-Aufruf an den aktiven Provider. Liefert str."""
+    return factory.get_provider().generate(prompt, temperature, num_ctx)
