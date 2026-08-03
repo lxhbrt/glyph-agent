@@ -65,7 +65,14 @@ def split_document(content, title, path, max_chars=1200):
         else:
             if buf:
                 chunks.append(buf)
-            buf = p
+            # Einzelner Absatz größer als max_chars: hart zerlegen (Embedding-Modell
+            # hat Token-Limit; ein Riesen-Chunk durfte vorher mit HTTP 500 fehlschlagen).
+            if len(p) > max_chars:
+                for i in range(0, len(p), max_chars):
+                    chunks.append(p[i:i + max_chars].strip())
+                buf = ""
+            else:
+                buf = p
     if buf:
         chunks.append(buf)
 
@@ -162,6 +169,120 @@ def remove_document(path):
     index["docs"] = [d for d in index["docs"] if d["path"] != path]
     save_index(index)
     return {"removed": before - len(index["docs"])}
+
+
+def build_index_from_vault(vault_path=None, quiet=False):
+    """
+    Baut/aktualisiert den Vektorindex direkt aus dem Obsidian-Vault.
+
+    Iteriert alle .md-Dateien unterhalb von config.VAULT_PATH (bzw. vault_path)
+    unter Ausschluss von Obsidian-internen Ordnern ('.'), 'backups' und
+    BLOCKED_DIRS — identische Filterlogik wie vault_tools.search_vault.
+    Ruft pro Datei index_document() auf (Hash-basiert: nur geänderte neu
+    indexed, unveränderte übersprungen, gelöschte entfernt).
+
+    Rückgabe: dict Zähler
+      {discovered, indexed, unchanged, skipped, failed, chunks, index_path, duration_s}
+      + optional log_lines (wenn quiet=False).
+    """
+    import os as _os
+    import time as _time
+    from . import config as _config
+    from . import vault_tools as _vt
+
+    root = vault_path or getattr(_config, "VAULT_PATH", "")
+    if not root or not _os.path.isdir(root):
+        return {"error": f"Vault-Pfad nicht gefunden: {root}"}
+
+    _start_t = _time.time()
+    lines = []
+    def log(msg):
+        if not quiet:
+            lines.append(msg)
+
+    # Zuerst gelöschte Dateien bereinigen: alle indexierten Pfade, die nicht mehr im Vault körperlich sind.
+    discovered_paths = set()
+    files = []
+    for dirpath, dirnames, filenames in _os.walk(root):
+        relroot = _os.path.relpath(dirpath, root)
+        segs = relroot.split(_os.sep)
+        # Nur UNTERORDNER filtern — der Root selbst (relroot='.') ist kein Obsidian-interner Ordner.
+        if segs != ["."] and any(s.startswith(".") for s in segs):
+            dirnames[:] = []
+            continue
+        if segs != ["."] and "backups" in segs:
+            dirnames[:] = []
+            continue
+        if segs != ["."]:
+            try:
+                if _vt._is_blocked(relroot):
+                    dirnames[:] = []
+                    continue
+            except Exception:
+                pass
+        for fn in filenames:
+            if not fn.endswith(".md"):
+                continue
+            full = _os.path.join(dirpath, fn)
+            rel = _os.path.relpath(full, root)
+            # Datei-Ebene auch gegen Blocklist prüfen
+            try:
+                if _vt._is_blocked(rel):
+                    continue
+            except Exception:
+                pass
+            files.append((rel, full))
+            discovered_paths.add("/" + rel)
+
+    # Entferne im Index liegende Pfade, die nicht mehr im Vault sind.
+    index = load_index()
+    removed = 0
+    for d in index.get("docs", []):
+        if d.get("path") not in discovered_paths:
+            remove_document(d.get("path"))
+            removed += 1
+
+    stats = {"indexed": 0, "unchanged": 0, "failed": 0, "chunks": 0, "removed": removed}
+    files.sort()
+    log(f"Vault: {root}")
+    log(f"documents discovered: {len(files)}")
+
+    for rel, full in files:
+        try:
+            with open(full, encoding="utf-8", errors="replace") as f:
+                content = f.read()
+        except OSError as e:
+            stats["failed"] += 1
+            log(f"  SKIP lesen: {rel} ({e})")
+            continue
+        title = _os.path.splitext(_os.path.basename(full))[0]
+        meta = {"vault": True}
+        try:
+            res = index_document(title, "/" + rel, content, meta=meta)
+        except Exception as e:
+            stats["failed"] += 1
+            log(f"  FEHLER: {rel} ({e})")
+            continue
+        if res.get("status") == "indexed":
+            stats["indexed"] += 1
+            stats["chunks"] += res.get("sections", 0)
+        elif res.get("status") == "unchanged":
+            stats["unchanged"] += 1
+
+    log(f"documents indexed: {stats['indexed']} (geändert/neu)")
+    log(f"documents unchanged: {stats['unchanged']}")
+    log(f"chunks created: {stats['chunks']}")
+    log(f"embeddings created: {stats['chunks']}")
+    log(f"stale removed: {stats['removed']}")
+    log(f"index written: {INDEX_PATH}")
+    log(f"done in {_time.time()-_start_t:.0f}s")
+
+    stats["discovered"] = len(files)
+    stats["skipped"] = stats["unchanged"] + stats["removed"]
+    stats["index_path"] = INDEX_PATH
+    if not quiet:
+        stats["log_lines"] = lines
+    return stats
 
 
 # --- Retrieval ---------------------------------------------------------------
