@@ -239,23 +239,26 @@ def run(user_message, system_extra=None, confirm=None, max_rounds=MAX_ROUNDS):
 
     need_web = (intent == "current") or (not routing.is_sufficient(vault))
     if need_web:
-        # Aktuelle Frage ODER unzureichender Vault -> Web-Recherche veranlassen.
-        # WebSearch wird dem Modell hier nicht hart aufgezwungen, sondern der Kontext
-        # um einen Hinweis ergänzt, damit das Modell im ersten Schritt WebSuchanfragen
-        # stellen darf (Aktualität/Bedarf). Der eigentliche WebSearch-Call läuft weiter
-        # über den bestehenden Tool-Loop.
-        if tool_calls:
-            history.append({
-                "role": "user",
-                "content": "Die Doku allein reicht nicht (oder die Frage ist aktualitätsbezogen). "
-                            "Ergänze ggf. eine WebSearch, wenn nötig — halte Dich an die Tool-Regeln.",
-            })
-        else:
-            history.append({
-                "role": "user",
-                "content": "Diese Frage ist aktualitätsbezogen oder der Vault ist leer. "
-                            "Wenn aktuelle/äußere Informationen nötig sind, nutze WebSearch.",
-            })
+        # DETERMINISTISCH: Bei aktuellem/wechselndem Bedarf WebSearch sofort ausfuehren
+        # (nicht nur Hinweis setzen!). Vorher hing der WebSearch-Aufruf am Ermessen des
+        # Modells -> gpt-5.6-luna waehlte ihn mal, mal nicht -> inkonsistente Antwort
+        # ('keine Preise', obwohl need_web=True war). Jetzt wird WebSearch wie VaultRecall
+        # deterministisch im Precheck ausgefuehrt; die Ergebnisse landen in tool_results.
+        query = _derive_web_query(user_message)
+        web_res = _run_web_search(query)
+        tool_calls.append({"tool": "WebSearch", "args": {"query": query}, "ok": True})
+        tool_results.append({
+            "tool": "WebSearch",
+            "args": {"query": query},
+            "result": {"ok": True, "result": web_res},
+        })
+        history.append({
+            "role": "user",
+            "content": f"Web-Kontext vorab geladen (Quelle: extern):\n{_json_dumps(web_res)}\n"
+                        "Nutze diesen Kontext, wenn er die Frage beantwortet. Wähle nur dann "
+                        "ein weiteres Tool, wenn die Antwort unvollständig bleibt.",
+        })
+        log.log("routing_precheck_web", intent=intent, web_hits=len(web_res) if web_res else 0)
 
     while rounds < max_rounds:
         rounds += 1
@@ -323,6 +326,34 @@ def _run_vault_recall(user_message):
         return retrieval.search(user_message)
     except Exception:
         return None
+
+
+def _derive_web_query(user_message):
+    """Leitet einen präzisen, webgroßzügigen Suchbegriff aus der Frage ab.
+    Bei Fragen nach konkreten Werten (Preis/Kosten/...) wird der Wertbegriff
+    an den Suchbegriff angehängt, damit z.B. 'Was kostet ein Zwergdackel?' ->
+    'Zwergdackel Preis' wird (bessere Treffer als die reine Frage)."""
+    import re as _re
+    q = (user_message or "").strip()
+    low = q.lower()
+    for word in ("preis", "kosten", "kostet", "welpenpreis"):
+        if word in low:
+            # Entferne Fragepräfixe, behalte Kern + Wertbegriff
+            core = _re.sub(r"^(was|wie|welche|welcher|welches|wieviel|wie viel)\s+", "", q, flags=_re.I)
+            core = _re.sub(r"[?.,]\s*$", "", core)
+            # Hänge 'Preis' an, falls nicht schon enthalten
+            if "preis" not in low and "kosten" not in low:
+                core = core + " Preis"
+            return core.strip()[:120] or q
+    return q[:120] or ""
+
+
+def _run_web_search(query):
+    """Führt WebSearch determinstisch aus. Liefert Ergebnis-Liste (oder [] bei Fehler)."""
+    try:
+        return web.web_search(query, count=5)
+    except Exception:
+        return []
 
 
 def _json_dumps(obj):
