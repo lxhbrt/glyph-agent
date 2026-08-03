@@ -159,6 +159,35 @@ def test_10_keine_web_behauptung():
           f"-> {tool['description'][:60] if tool else '?'}")
 
 
+def test_11_keyword_boost_moc_unterschied():
+    print("\n[11] Hybrid-Reranking: Grundlagen-MOC bei Unterschied-Frage in Top-5:")
+    # Regressionsfall vom 2026-08-03: Frage enthält beide Begriffe; die Grundlagen-MOC
+    # ('arbeitssicherheit' im Titel) muss trotz niedrigerem Vektor-Score nach vorne.
+    r.remove_document("/wiki/AS/00 MOC - Arbeitssicherheit.md")
+    r.remove_document("/wiki/AS/Maschinen.md")
+    r.remove_document("/wiki/AS/Betriebsanweisungen.md")
+    r.index_document("00 MOC - Arbeitssicherheit", "/wiki/AS/00 MOC - Arbeitssicherheit.md",
+                     "Arbeitssicherheit und Arbeitsschutz sind eng verwandte Begriffe. "
+                     "Arbeitssicherheit bezeichnet den Schutz vor Arbeitsunfällen und "
+                     "Berufskrankheiten, Arbeitsschutz umfasst zusätzlich den Gesundheits- "
+                     "und Gefahrenschutz am Arbeitsplatz.")
+    r.index_document("Maschinen", "/wiki/AS/Maschinen.md",
+                     "Maschinen müssen Sicherheitseinrichtungen, Schutzeinrichtungen und "
+                     "Not-Aus haben. Anforderungen an Maschinen und Geräte regelt die "
+                     "Maschinenrichtlinie und Betriebsanweisungen.")
+    r.index_document("Betriebsanweisungen", "/wiki/AS/Betriebsanweisungen.md",
+                     "Betriebsanweisungen beschreiben sicheres Verhalten, Umgang mit "
+                     "Maschinen und Gefahrstoffen.")
+    res = r.search("Was ist der Unterschied zwischen Arbeitsschutz und Arbeitssicherheit?",
+                   top_k=5, min_score=0.5)
+    paths = [x["path"] for x in res["results"]]
+    check("MOC in Top-5", "/wiki/AS/00 MOC - Arbeitssicherheit.md" in paths,
+          f"-> {paths}")
+    check("MOC hat Boost > 0", any(x["boost"] > 0 for x in res["results"]
+                                   if "00 MOC - Arbeitssicherheit" in x["path"]),
+          f"-> boosts={[x['boost'] for x in res['results']]}")
+
+
 if __name__ == "__main__":
     print("=== Vault-Recall-Tests (Stufe B) ===")
     test_1_relevante_treffer()
@@ -171,6 +200,7 @@ if __name__ == "__main__":
     test_8_widersprueche_nicht_vereinheitlicht()
     test_9_websearch_getrennt()
     test_10_keine_web_behauptung()
+    test_11_keyword_boost_moc_unterschied()
     # Aufräumen
     import shutil
     shutil.rmtree(_TMP, ignore_errors=True)

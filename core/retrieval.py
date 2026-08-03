@@ -294,17 +294,79 @@ def build_index_from_vault(vault_path=None, quiet=False):
 
 # --- Retrieval ---------------------------------------------------------------
 
+def _normalize(text: str) -> str:
+    """Kleine Normalisierung: lowercase + Whitespace komprimieren."""
+    import re as _re
+    return _re.sub(r"\s+", " ", (text or "").lower()).strip()
+
+
+def _keyword_boost(query: str, doc: dict) -> float:
+    """
+    Hybrider Keyword-Boost für exakte Begriffe in Titel/Pfad (nicht Chunk-Text).
+
+    Hebt konzeptionelle Grundlagen-Dokumente (z. B. '00 MOC - Arbeitssicherheit.md')
+    über rein vektoriell ähnliche, aber thematisch engere Chunks (Maschinen etc.).
+    Wirkt als Reranker auf den Top-Kandidaten — niemals als Ersatz der Vektorsuche.
+
+    Boost-Werte moderat: bei Vektor-Scores 0.65–0.72 heben 0.04–0.16 die richtige
+    Grundlagen-MOC deutlich nach vorne, ohne die Vektorsuche zu überstimmen.
+    Nur exakte Begriffe (nicht Teilstrings wie 'Arbeitsschutzmaßnahmen' als Volltreffer).
+    """
+    query_norm = _normalize(query)
+    path = _normalize(doc.get("path") or "")
+    title = _normalize(doc.get("title") or (path.rsplit("/", 1)[-1] if path else ""))
+
+    # Begriffspaare, die in der Frage gemeinsam vorkommen (z. B. Arbeitsschutz + Arbeitssicherheit)
+    pair_terms = []
+    for t1, t2 in (("arbeitsschutz", "arbeitssicherheit"),):
+        if t1 in query_norm and t2 in query_norm:
+            pair_terms.append((t1, t2))
+
+    boost = 0.0
+    # Paar-Frage (Frage enthält beide Begriffe):
+    # Eine Datei, die MINDESTENS EINEN der Begriffe im Titel trägt, ist bei solchen
+    # Fragen sehr wahrscheinlich die Grundlagen-/Unterscheidungs-Datei — auch wenn
+    # der zweite Begriff nicht in der Datei steht (z. B. '00 MOC - Arbeitssicherheit.md'
+    # bei 'Arbeitsschutz vs. Arbeitssicherheit'). Voller Paar-Boost.
+    for t1, t2 in pair_terms:
+        if (t1 in title or t2 in title):
+            boost += 0.16
+            return boost
+        # Kein Titel-Treffer: dann das Paar im Pfad (Ordnerstruktur) suchen
+        if (t1 in path and t2 in path):
+            boost += 0.16
+            return boost
+
+    # Einzelne exakte Begriffe im Dateinamen/Titel (stärker) oder Pfad (schwächer)
+    for term in ("arbeitsschutz", "arbeitssicherheit"):
+        if term in title:
+            boost += 0.08
+        elif term in path:
+            boost += 0.04
+
+    return boost
+
+
 def search(query, top_k=None, min_score=None):
     """
-    Semantische Suche im Vektorindex. Liefert {status, query, candidates,
-    selected, threshold, sources, results, error?}. top_k/min_score konfigurierbar
-    (Config-Defaults: VAULT_TOP_K, VAULT_MIN_SCORE).
+    Semantische Suche im Vektorindex mit Hybrid-Reranking (Vektor + Keyword-Boost).
+
+    Liefert {status, query, candidates, selected, threshold, sources, results, error?}.
+    top_k/min_score konfigurierbar (Config-Defaults: VAULT_TOP_K, VAULT_MIN_SCORE).
+
+    Zwei getrennte K-Werte:
+      - CANDIDATE_K (50): Vektor-Kandidaten, auf denen der Keyword-Boost wirkt
+        (damit ein Boost Rang 24 noch erreichen kann).
+      - FINAL_K (5): nach Hybrid-Reranking ausgelieferte Treffer.
+    Die Schwelle (0.6) bleibt unverändert und wird NACH dem Boost angewendet.
     """
     import os
     if top_k is None:
         top_k = int(os.environ.get("VAULT_TOP_K", "4"))
     if min_score is None:
         min_score = float(os.environ.get("VAULT_MIN_SCORE", "0.6"))
+    candidate_k = int(os.environ.get("VAULT_CANDIDATE_K", "50"))
+    final_k = top_k
     index = load_index()
     docs = index.get("docs", [])
     if not docs:
@@ -315,22 +377,38 @@ def search(query, top_k=None, min_score=None):
     q_emb = embed_text(query)
     if not q_emb:
         return {"status": "error", "query": query, "error": "Embedding fehlgeschlagen"}
+
+    # 1) Vektor-Score für alle Docs, sortiert absteigend, Top-CANDIDATE_K behalten
     scored = []
     for d in docs:
         s = cosine(q_emb, d.get("embedding", []))
         scored.append((s, d))
     scored.sort(key=lambda x: x[0], reverse=True)
-    selected = [{"score": s, **{k: (v if k != "embedding" else None) for k, v in d.items()}}
-                for s, d in scored if s >= min_score][:top_k]
+    candidates = scored[:candidate_k]
+
+    # 2) Hybrid-Reranking: Vektor-Score + Keyword-Boost (nur auf Kandidaten)
+    reranked = []
+    for s, d in candidates:
+        boost = _keyword_boost(query, d)
+        reranked.append((s + boost, s, boost, d))
+    reranked.sort(key=lambda x: x[0], reverse=True)
+
+    # 3) Schwelle + FINAL_K: Hybrid-Score muss >= min_score sein (Boost kann drunterliegende anheben)
+    selected = [
+        {"score": round(hybrid, 4), "vector_score": round(vec, 4), "boost": round(b, 4),
+         **{k: (v if k != "embedding" else None) for k, v in d.items()}}
+        for hybrid, vec, b, d in reranked if hybrid >= min_score
+    ][:final_k]
     sources = sorted({r["path"] for r in selected})
     return {
         "status": "success",
         "query": query,
-        "candidates": len(scored),
+        "candidates": len(candidates),
         "selected": len(selected),
         "threshold": min_score,
         "sources": sources,
         "results": selected,
-        "top_k": top_k,
+        "top_k": final_k,
+        "candidate_k": candidate_k,
         "error": None,
     }
