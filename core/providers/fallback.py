@@ -31,6 +31,9 @@ class FallbackProvider(OpenRouterProvider):
         self.fallback_model = fallback_model or getattr(
             config, "AGENT_OPENROUTER_FALLBACK_MODEL", self.model)
         self.local_fallback = local_fallback or OllamaProvider()
+        # Letzter tatsächlich verwendeter Modus (openrouter | openrouter:free | local).
+        # Wird vom Tool-Loop für den fallback_used-Trace ausgelesen (nie hartcodiert False).
+        self.last_used = None
 
     @property
     def provider_name(self):
@@ -41,18 +44,22 @@ class FallbackProvider(OpenRouterProvider):
         return f"{self.model} → {self.fallback_model} (lokal: {self.local_fallback.model_name})"
 
     def _call(self, kind, args, kwargs):
-        """Versucht: bevorzugtes OpenRouter → kostenloses OpenRouter → lokal Qwen."""
+        """Versucht: bevorzugtes OpenRouter → kostenloses OpenRouter → lokal Qwen.
+        Setzt self.last_used auf den tatsächlich verwendeten Modus."""
         # Stufe 1: bevorzugtes Modell.
         try:
             text = self._cloud(kind, args, kwargs, self.model)
+            self.last_used = "openrouter"
             return text, "openrouter"
         except Exception as e1:
             log.warning("OpenRouter '%s' fehlgeschlagen (%s) — versuche kostenloses Modell",
                         self.model, e1)
+            self.last_used = "openrouter:free"
         # Stufe 2: kostenloses OpenRouter-Modell.
         if self.fallback_model and self.fallback_model != self.model:
             try:
                 text = self._cloud(kind, args, kwargs, self.fallback_model)
+                self.last_used = "openrouter:free"
                 return text, "openrouter:free"
             except Exception as e2:
                 log.warning("OpenRouter '%s' fehlgeschlagen (%s)",
@@ -63,6 +70,7 @@ class FallbackProvider(OpenRouterProvider):
         fn = getattr(self.local_fallback, kind, None)
         if fn is None:
             raise RuntimeError("Kein lokaler Fallback verfügbar.")
+        self.last_used = "local"
         return fn(*args, **kwargs), "local"
 
     def _cloud(self, kind, args, kwargs, model):

@@ -20,20 +20,32 @@ Sicherheit:
   - Schreib-Tools nur mit confirm-Callback, der im Chat-Flow den Nutzer fragt
 """
 from . import llm, tool_registry, log, config
+from . import routing, retrieval, web
 
 MAX_ROUNDS = 4
 
 
-def _build_trace(tool_calls, tool_results=None, fallback_used=False):
+def _build_trace(tool_calls, tool_results=None, fallback_used=None):
     """Erzeugt einen Diagnose-Trace (sichtbarer Provider/Modell/Tool-Status).
-    Wird an jede run()-Antwort angehängt (Punkt: sichtbare Diagnose)."""
+    Wird an jede run()-Antwort angehängt (Punkt: sichtbare Diagnose).
+
+    fallback_used: Wenn übergeben (True/False), wird genau dieser Wert gesetzt.
+    Wenn None, wird er aus dem Provider-Zustand abgeleitet: true nur bei bewusstem
+    lokalem Fallback im FallbackProvider (Kette OpenRouter → local-Qwen), damit die
+    UI einen echten Qwen-Fallback sichtbar ausweist — nie hartcodiert False.
+    """
     try:
         provider = llm.get_provider()
         pname = getattr(provider, "provider_name", "?")
         mname = getattr(provider, "model_name", "?")
     except Exception:
+        provider = None
         pname = "?"
         mname = "?"
+    if fallback_used is None:
+        # Ableiten: bewusster lokaler Qwen-Fallback (nicht openrouter:free).
+        last = getattr(provider, "last_used", None)
+        fallback_used = bool(pname == "fallback" and last == "local")
     # Ergebnis-Längen aus tool_results (volles Ergebnis), nicht aus tool_calls (nur meta).
     result_by_tool = {}
     for tr in tool_results or []:
@@ -61,8 +73,55 @@ def _build_trace(tool_calls, tool_results=None, fallback_used=False):
         "fallback_used": fallback_used,
         "tool_calls": tool_calls_meta,
         "retrieval": _build_retrieval_trace(tool_results),
+        "sources": _build_sources_trace(tool_results),
         "request_id": "local",  # lokale Verarbeitung: keine externe Request-ID verfügbar
     }
+
+
+def _build_sources_trace(tool_results):
+    """Baut den zweigeteilten Quellen-Trace: vault {count,status,items} und,
+    nur wenn ausgeführt, web {count,status,items}. Liefert dict (immer)."""
+    vault_count = 0
+    web_count = 0
+    vault_items = []
+    web_items = []
+    for tr in tool_results or []:
+        name = tr.get("tool")
+        res = (tr.get("result") or {})
+        # Vault-Treffer: Anzahl aus retrieval.search()-Ergebnis (selected) entnehmen.
+        if name in ("VaultRecall", "VaultSearch"):
+            payload = res.get("result") or {}
+            if isinstance(payload, dict):
+                selected = int(payload.get("selected") or 0)
+                vault_count += selected
+                vault_items += [s for s in (payload.get("sources") or []) if s not in vault_items]
+            elif isinstance(payload, list):
+                vault_count += len(payload)
+                for it in payload:
+                    p = it.get("path") if isinstance(it, dict) else None
+                    if p and p not in vault_items:
+                        vault_items.append(p)
+        elif name in ("WebSearch", "ExtractUrl", "FetchUrl"):
+            payload = res.get("result")
+            n = 0
+            if isinstance(payload, dict):
+                n = int(payload.get("count") or len(payload.get("sources") or payload.get("results") or []))
+            elif isinstance(payload, (list, tuple)):
+                n = len(payload)
+            web_count += n
+            if name == "WebSearch" and isinstance(payload, dict):
+                web_items += [s.get("url") or s.get("link") or s.get("title") for s in (payload.get("sources") or []) if isinstance(s, dict)]
+    out = {
+        "vault": {"count": vault_count, "status": "success" if vault_count > 0 else "empty", "items": vault_items},
+    }
+    # web nur, wenn tatsächlich ausgeführt
+    if any(tr.get("tool") in ("WebSearch", "ExtractUrl", "FetchUrl") for tr in (tool_results or [])):
+        out["web"] = {
+            "count": web_count,
+            "status": "success" if web_count > 0 else "empty",
+            "items": web_items,
+        }
+    return out
 
 
 def _build_retrieval_trace(tool_results):
@@ -143,6 +202,49 @@ def run(user_message, system_extra=None, confirm=None, max_rounds=MAX_ROUNDS):
     # Tool-Ergebnisse sammeln (für einen evtl. abschließenden strikten Antwort-Prompt)
     tool_results = []
 
+    # --- Deterministischer Routing-Precheck (kein LLM-Call): "Doku, Internet oder beides". ---
+    # intent == "current" -> WebSearch darf direkt (parallel zu VaultRecall).
+    # sonst -> VaultRecall zuerst; Web nur wenn unzureichend (selected < 1).
+    intent = routing.classify_intent(user_message)
+    vault = _run_vault_recall(user_message)
+    if vault is not None:
+        tool_calls.append({"tool": "VaultRecall", "args": {"query": user_message}, "ok": True})
+        # Ergebnis in der gleichen Form wie tool_registry.execute ablegen (ok+result),
+        # damit _build_retrieval_trace / _build_sources_trace es korrekt auswerten.
+        tool_results.append({
+            "tool": "VaultRecall",
+            "args": {"query": user_message},
+            "result": {"ok": True, "result": vault},
+        })
+        history.append({
+            "role": "user",
+            "content": f"Vault-Kontext vorab geladen (Quelle: intern):\n{_json_dumps(vault)}\n"
+                        "Nutze diesen Kontext, wenn er die Frage beantwortet. Wähle nur dann "
+                        "ein weiteres Tool, wenn die Antwort unvollständig bleibt.",
+        })
+        log.log("routing_precheck", intent=intent, vault_status=vault.get("status"),
+                selected=vault.get("selected"))
+
+    need_web = (intent == "current") or (not routing.is_sufficient(vault))
+    if need_web:
+        # Aktuelle Frage ODER unzureichender Vault -> Web-Recherche veranlassen.
+        # WebSearch wird dem Modell hier nicht hart aufgezwungen, sondern der Kontext
+        # um einen Hinweis ergänzt, damit das Modell im ersten Schritt WebSuchanfragen
+        # stellen darf (Aktualität/Bedarf). Der eigentliche WebSearch-Call läuft weiter
+        # über den bestehenden Tool-Loop.
+        if tool_calls:
+            history.append({
+                "role": "user",
+                "content": "Die Doku allein reicht nicht (oder die Frage ist aktualitätsbezogen). "
+                            "Ergänze ggf. eine WebSearch, wenn nötig — halte Dich an die Tool-Regeln.",
+            })
+        else:
+            history.append({
+                "role": "user",
+                "content": "Diese Frage ist aktualitätsbezogen oder der Vault ist leer. "
+                            "Wenn aktuelle/äußere Informationen nötig sind, nutze WebSearch.",
+            })
+
     while rounds < max_rounds:
         rounds += 1
         # Qwen mit aktuellem Verlauf befragen (wir bauen den Prompt inline)
@@ -200,15 +302,51 @@ def run(user_message, system_extra=None, confirm=None, max_rounds=MAX_ROUNDS):
             "rounds": rounds, "tool_calls": tool_calls, "ok": False, "trace": _build_trace(tool_calls, tool_results)}
 
 
+def _run_vault_recall(user_message):
+    """Führt VaultRecall determinstisch vor der Modell-Schleife aus.
+    Liefert retrieval.search()-Ergebnis (dict) oder None bei Fehler/Nicht-Verfügbarkeit.
+    Fehler werden abgefangen: ein fehlender/fehlerhafter Vault-Index darf den
+    Gesamtablauf nicht stoppen (fällt dann in der Entscheidung auf Web zurück)."""
+    try:
+        return retrieval.search(user_message)
+    except Exception:
+        return None
+
+
+def _json_dumps(obj):
+    import json
+    return json.dumps(obj, ensure_ascii=False, default=str, indent=2)
+
+
 def _fmt_tool_results(tool_results):
-    """Formatiert Tool-Ergebnisse zur Weitergabe an den strikten Antwort-Prompt."""
+    """Formatiert Tool-Ergebnisse zur Weitergabe an den strikten Antwort-Prompt.
+    Interne (VaultRecall) und externe (WebSearch ...) Quellen werden getrennt
+    ausgewiesen, damit das Antwortmodell Doku- und Web-Basis sauber unterscheidet."""
     import json as _json
-    parts = []
+
+    internal = []
+    external = []
+    other = []
     for tr in tool_results:
-        parts.append(
-            f"[{tr['tool']} args={_json.dumps(tr['args'], ensure_ascii=False)}]\n"
-            + _json.dumps(tr['result'], ensure_ascii=False, default=str)
+        name = tr.get("tool")
+        block = (
+            f"[{name} args={_json.dumps(tr['args'], ensure_ascii=False)}]\n"
+            + _json.dumps(tr["result"], ensure_ascii=False, default=str)
         )
+        if name in ("VaultRecall", "VaultSearch", "ReadNote"):
+            internal.append(block)
+        elif name in ("WebSearch", "ExtractUrl", "FetchUrl"):
+            external.append(block)
+        else:
+            other.append(block)
+
+    parts = []
+    if internal:
+        parts.append("internal_sources:\n" + "\n\n".join(internal))
+    if external:
+        parts.append("external_sources:\n" + "\n\n".join(external))
+    if other:
+        parts.append("\n\n".join(other))
     body = "\n\n".join(parts)
 
     # Datenschutz-Schranke: Kürzt Kontext, der an ein Cloud-Modell (OpenRouter)

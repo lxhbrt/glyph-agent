@@ -33,12 +33,20 @@ def check(name, cond, detail=""):
 
 
 def run_chain(search_results, llm_script):
-    """Führt tool_loop.run mit gemocktem WebSearch + LLM aus."""
+    """Führt tool_loop.run mit gemocktem WebSearch + LLM + leerem Vault (Precheck) aus.
+    Der Vault-Precheck liefert hier einen LEEREN Vault (status=empty), damit WebSearch
+    die relevante Recherche-Quelle ist und der deterministische Precheck need_web setzt."""
     from core import tool_loop
     import core.web as web
     import core.llm as llm_mod
+    import core.retrieval as retrieval_mod
 
     web.web_search = lambda query, count=5, source="exa": search_results
+    # Precheck-Vault: leer -> WebSearch wird nachgezogen (gewolltes Routing-Verhalten).
+    retrieval_mod.search = lambda query, top_k=None, min_score=None: {
+        "status": "empty", "query": query, "candidates": 0, "selected": 0,
+        "threshold": 0.6, "sources": [], "results": [],
+    }
     calls = {"n": 0}
 
     def fake_chat(system, user, temperature=0.3, num_ctx=8192):
@@ -50,6 +58,11 @@ def run_chain(search_results, llm_script):
 
     llm_mod.chat = fake_chat
     return tool_loop.run("Suche nach dem besten Setup", max_rounds=3)
+
+
+def web_tc(tool_calls):
+    """Liefert den WebSearch-Eintrag aus tool_calls (nach dem VaultRecall-Precheck)."""
+    return next((t for t in tool_calls if t.get("tool") == "WebSearch"), {})
 
 
 def test_1_modell_und_trace():
@@ -66,9 +79,9 @@ def test_1_modell_und_trace():
     check("provider im Trace", bool(trace.get("provider")))
     check("model im Trace", bool(trace.get("model")))
     check("tool_calls im Trace", bool(trace.get("tool_calls")))
-    tc = (trace.get("tool_calls") or [{}])[0]
-    check("Tool-Status success", tc.get("status") == "success", f"-> {tc.get('status')}")
-    check("Tool-Ergebnis-Länge > 0", (tc.get("result_length") or 0) > 0, f"-> {tc.get('result_length')}")
+    ws = web_tc(trace.get("tool_calls") or [])
+    check("WebSearch-Tool-Status success", ws.get("status") == "success", f"-> {ws.get('status')}")
+    check("WebSearch-Ergebnis-Länge > 0", (ws.get("result_length") or 0) > 0, f"-> {ws.get('result_length')}")
     check("kein Fallback", trace.get("fallback_used") in (False, None))
 
 
@@ -78,10 +91,16 @@ def test_2_tool_aufruf_und_propagation():
     from core import tool_loop
     import core.web as web
     import core.llm as llm_mod
+    import core.retrieval as retrieval_mod
 
     web.web_search = lambda query, count=5, source="exa": [
         {"title": "Setup-Guide", "url": "https://example.com/setup", "snippet": "Empfohlen: Konfig A."}
     ]
+    _orig_retr = retrieval_mod.search
+    retrieval_mod.search = lambda query, top_k=None, min_score=None: {
+        "status": "empty", "query": query, "candidates": 0, "selected": 0,
+        "threshold": 0.6, "sources": [], "results": [],
+    }
     orig_chat = llm_mod.chat
 
     def fake_chat(system, user, temperature=0.3, num_ctx=8192):
@@ -95,6 +114,7 @@ def test_2_tool_aufruf_und_propagation():
     llm_mod.chat = fake_chat
     res = tool_loop.run("Suche Setup", max_rounds=3)
     llm_mod.chat = orig_chat
+    retrieval_mod.search = _orig_retr
 
     check("Tool-Ergebnis im finalen Prompt", captured.get("tool_in_prompt") is True)
     check("Antwort referenziert Tool-Fakt", "Konfig A" in res.get("answer", ""), f"-> {res.get('answer','')[:60]}")
@@ -107,8 +127,14 @@ def test_3_fehlerfall_leeres_ergebnis():
     from core import tool_loop
     import core.web as web
     import core.llm as llm_mod
+    import core.retrieval as retrieval_mod
 
     web.web_search = lambda query, count=5, source="exa": []
+    _orig_retr = retrieval_mod.search
+    retrieval_mod.search = lambda query, top_k=None, min_score=None: {
+        "status": "empty", "query": query, "candidates": 0, "selected": 0,
+        "threshold": 0.6, "sources": [], "results": [],
+    }
     orig = llm_mod.chat
 
     def fake_chat(system, user, temperature=0.3, num_ctx=8192):
@@ -122,6 +148,7 @@ def test_3_fehlerfall_leeres_ergebnis():
     llm_mod.chat = fake_chat
     res = tool_loop.run("Suche nach etwas Unbekanntem", max_rounds=3)
     llm_mod.chat = orig
+    retrieval_mod.search = _orig_retr
 
     check("Antwort lehnt Erfindung ab", "kein verwertbares" in res.get("answer", ""), f"-> {res.get('answer','')[:80]}")
     check("Keine erfundenen URLs", "http://" not in res.get("answer", ""))
@@ -132,10 +159,17 @@ def test_4_e2e_assertion():
     from core import tool_loop
     import core.web as web
     import core.llm as llm_mod
+    import core.retrieval as retrieval_mod
 
     web.web_search = lambda query, count=5, source="exa": [
         {"title": "T", "url": "https://example.com/t", "snippet": "Fakt Y"}
     ]
+    # Vault-Precheck: leer -> WebSearch relevant (Routing-Verhalten).
+    _orig_retr = retrieval_mod.search
+    retrieval_mod.search = lambda query, top_k=None, min_score=None: {
+        "status": "empty", "query": query, "candidates": 0, "selected": 0,
+        "threshold": 0.6, "sources": [], "results": [],
+    }
     orig = llm_mod.chat
 
     def fake_chat(system, user, temperature=0.3, num_ctx=8192):
@@ -149,10 +183,11 @@ def test_4_e2e_assertion():
     llm_mod.chat = fake_chat
     res = tool_loop.run("Suche Fakt", max_rounds=3)
     llm_mod.chat = orig
+    retrieval_mod.search = _orig_retr
 
     trace = res.get("trace") or {}
     check("Tool aufgerufen", any(t.get("tool") == "WebSearch" for t in res.get("tool_calls", [])), "true")
-    check("Tool-Ergebnis vorhanden", (trace.get("tool_calls") or [{}])[0].get("result_length", 0) > 0, "true")
+    check("Tool-Ergebnis vorhanden", (web_tc((trace.get("tool_calls") or [])).get("result_length") or 0) > 0, "true")
     check("Provider im Trace", bool(trace.get("provider")), f"-> {trace.get('provider')}")
     check("Modell im Trace", bool(trace.get("model")), f"-> {trace.get('model')}")
     check("Antwort enthält Tool-Fakt", "Fakt Y" in res.get("answer", ""), "true")

@@ -60,6 +60,8 @@ def main():
     import importlib as _il  # lokal, um Verschattung durch load() zu vermeiden
     print("=== Provider-Selbsttest ===\n")
 
+    test_trace_fallback_used()
+
     print("[1] olama (lokal) — muss laden:")
     p = load("ollama")
     check("provider_name == 'ollama'", p.provider_name == "ollama", f"-> {p.provider_name}")
@@ -92,6 +94,8 @@ def main():
         answer = p.chat("Du.", "Sag nur: FALLBACK_OK")
         check("Lokale Antwort erzeugt (Stufe 3)", bool(answer.strip()), f"-> '{answer[:30]}...'")
         check("Lokaler Hinweis vorhanden", "lokal" in answer.lower() or "nicht erreichbar" in answer.lower())
+        # fallback_used-Fix: nach dem bewussten lokalen Qwen-Fallback muss last_used == 'local'
+        check("last_used == 'local' (bewusster Qwen-Fallback)", p.last_used == "local", f"-> {p.last_used}")
     except Exception as e:
         check("Fallback lief durch", False, f"-> {type(e).__name__}: {str(e)[:60]}")
 
@@ -118,6 +122,61 @@ def main():
 
     print(f"\n=== Ergebnis: {OK} ok, {FAIL} Fehler ===")
     sys.exit(1 if FAIL else 0)
+
+
+def test_trace_fallback_used():
+    """fallback_used-Fix: _build_trace leitet den bewussten Qwen-Fallback aus dem
+    Provider-Zustand ab, statt hartcodiert False zu setzen. Isoliert (keine API-Calls)."""
+    from core import tool_loop, llm
+
+    class Fake:
+        def __init__(self, pname, model, last_used=None):
+            self.provider_name = pname
+            self.model_name = model
+            self.last_used = last_used
+
+    orig = llm.get_provider
+
+    def with_provider(fake, fn):
+        llm.get_provider = lambda: fake
+        try:
+            return fn()
+        finally:
+            llm.get_provider = orig
+
+    # Fallback-Bewusstes lokales Qwen
+    with_provider(Fake("fallback", "gpt → free (lokal: qwen)", "local"), lambda: (
+        check("lokaler Qwen-Fallback -> fallback_used true",
+              tool_loop._build_trace([], [], None).get("fallback_used") is True)
+    ))
+
+    # FallbackProvider, aber Modellwechsel nur in OpenRouter (openrouter:free) -> kein lokaler Fallback
+    with_provider(Fake("fallback", "gpt → free", "openrouter:free"), lambda: (
+        check("openrouter:free (kein lokal) -> fallback_used false",
+              tool_loop._build_trace([], [], None).get("fallback_used") is False)
+    ))
+
+    # Reines OpenRouter
+    with_provider(Fake("openrouter", "gpt", "openrouter"), lambda: (
+        check("openrouter -> fallback_used false",
+              tool_loop._build_trace([], [], None).get("fallback_used") is False)
+    ))
+
+    # Reines Ollama ohne last_used
+    with_provider(Fake("ollama", "qwen-solid"), lambda: (
+        check("ollama -> fallback_used false",
+              tool_loop._build_trace([], [], None).get("fallback_used") is False)
+    ))
+
+    # Expliziter Wert wird respektiert
+    with_provider(Fake("openrouter", "gpt"), lambda: (
+        check("explizit True hat Vorrang",
+              tool_loop._build_trace([], [], True).get("fallback_used") is True)
+    ))
+
+    # Diskrepanz-Schutz: Diese Funktion prüft nur _build_trace-isoliert; die
+    # Zähler werden global geführt, kein Delta nötig.
+    print("[trace-fallback] abgeschlossen.")
 
 
 if __name__ == "__main__":

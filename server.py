@@ -164,9 +164,25 @@ def main():
                 self._send(404, {"error": "Not found"})
 
     config.ensure_dirs()
+    # Start-Validierung des Primär-Providers: Bei openrouter (Recherchepfad) NUR starten,
+    # wenn der Key vorhanden ist — sonst klare Fehlermeldung statt stillem Fallback auf Qwen.
+    try:
+        provider = llm.get_provider()
+    except Exception as e:
+        print(f"❌ Provider-Initialisierung fehlgeschlagen: {e}", file=sys.stderr)
+        sys.exit(1)
+    if getattr(provider, "provider_name", "") in ("openrouter", "fallback"):
+        key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+        if not key:
+            print(
+                "❌ AGENT_PRIMARY_PROVIDER=openrouter erfordert OPENROUTER_API_KEY.\n"
+                "   Start abgebrochen — KEIN stiller Fallback auf Qwen für den Recherchepfad.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
     server = HTTPServer((HOST, PORT), Handler)
     print(f"glyph-agent HTTP-Dienst läuft auf http://{HOST}:{PORT}")
-    print(f"  Provider: {llm.get_provider().provider_name}, Modell: {llm.get_provider().model_name}")
+    print(f"  Provider: {provider.provider_name}, Modell: {provider.model_name}")
     print("  POST /chat  |  GET /health")
     try:
         server.serve_forever()
