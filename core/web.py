@@ -37,7 +37,14 @@ def search_exa(query, count=5, start_published_date=None):
     Führt eine Exa-Suche durch. query darf nur anonymisierte/öffentliche
     Suchbegriffe enthalten. Liefert Liste von {title, url, snippet}.
     """
-    payload = {"query": query, "numResults": count, "contents": {"text": False}}
+    payload = {
+        "query": query,
+        "numResults": count,
+        # Inhalte anfordern, damit Snippets/Highlights gefüllt werden (sonst liefert
+        # Exa leere Snippet-Texte und selbst gute Modelle können nichts auswerten).
+        "contents": {"text": True, "highlights": True},
+        "highlight": {"num_sentences": 2},
+    }
     if start_published_date:
         payload["startPublishedDate"] = start_published_date
     req = urllib.request.Request(
@@ -53,10 +60,16 @@ def search_exa(query, count=5, start_published_date=None):
         data = json.loads(resp.read().decode("utf-8"))
     results = []
     for r in data.get("results", []):
+        snip = r.get("snippet") or ""
+        # Exa liefert Highlights in r['highlights'] als Liste; fallback auf text.
+        if not snip and r.get("highlights"):
+            snip = " ".join(r["highlights"][:2])
+        if not snip and r.get("text"):
+            snip = r["text"][:300]
         results.append({
             "title": r.get("title", ""),
             "url": r.get("url", ""),
-            "snippet": r.get("snippet", "") or (r.get("text") or "")[:300],
+            "snippet": snip[:400],
         })
     return results
 
