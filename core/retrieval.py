@@ -175,11 +175,11 @@ def build_index_from_vault(vault_path=None, quiet=False):
     """
     Baut/aktualisiert den Vektorindex direkt aus dem Obsidian-Vault.
 
-    Iteriert alle .md-Dateien unterhalb von config.VAULT_PATH (bzw. vault_path)
-    unter Ausschluss von Obsidian-internen Ordnern ('.'), 'backups' und
-    BLOCKED_DIRS — identische Filterlogik wie vault_tools.search_vault.
-    Ruft pro Datei index_document() auf (Hash-basiert: nur geänderte neu
-    indexed, unveränderte übersprungen, gelöschte entfernt).
+    Iteriert alle .md-Dateien unterhalb der konfigurierten Vaults (config.VAULT_PATHS,
+    bzw. vault_path falls gesetzt) unter Ausschluss von Obsidian-internen Ordnern ('.'),
+    'backups' und BLOCKED_DIRS — identische Filterlogik wie vault_tools.search_vault.
+    Ruft pro Datei index_document() auf (Hash-basiert: nur geänderte neu indexed,
+    unveränderte übersprungen, gelöschte entfernt).
 
     Rückgabe: dict Zähler
       {discovered, indexed, unchanged, skipped, failed, chunks, index_path, duration_s}
@@ -190,9 +190,11 @@ def build_index_from_vault(vault_path=None, quiet=False):
     from . import config as _config
     from . import vault_tools as _vt
 
-    root = vault_path or getattr(_config, "VAULT_PATH", "")
-    if not root or not _os.path.isdir(root):
-        return {"error": f"Vault-Pfad nicht gefunden: {root}"}
+    roots = [vault_path] if vault_path else list(getattr(_config, "VAULT_PATHS", [_config.VAULT_PATH]))
+    roots = [_os.path.realpath(r) for r in roots]
+    invalid = [r for r in roots if not _os.path.isdir(r)]
+    if invalid:
+        return {"error": f"Vault-Pfad nicht gefunden: {invalid}"}
 
     _start_t = _time.time()
     lines = []
@@ -202,37 +204,42 @@ def build_index_from_vault(vault_path=None, quiet=False):
 
     # Zuerst gelöschte Dateien bereinigen: alle indexierten Pfade, die nicht mehr im Vault körperlich sind.
     discovered_paths = set()
-    files = []
-    for dirpath, dirnames, filenames in _os.walk(root):
-        relroot = _os.path.relpath(dirpath, root)
-        segs = relroot.split(_os.sep)
-        # Nur UNTERORDNER filtern — der Root selbst (relroot='.') ist kein Obsidian-interner Ordner.
-        if segs != ["."] and any(s.startswith(".") for s in segs):
-            dirnames[:] = []
-            continue
-        if segs != ["."] and "backups" in segs:
-            dirnames[:] = []
-            continue
-        if segs != ["."]:
-            try:
-                if _vt._is_blocked(relroot):
-                    dirnames[:] = []
-                    continue
-            except Exception:
-                pass
-        for fn in filenames:
-            if not fn.endswith(".md"):
+    files = []  # (abs_path, index_path) wobei index_path den Vault-Präfix enthält
+    for root in roots:
+        for dirpath, dirnames, filenames in _os.walk(root):
+            relroot = _os.path.relpath(dirpath, root)
+            segs = relroot.split(_os.sep)
+            # Nur UNTERORDNER filtern — der Root selbst (relroot='.') ist kein Obsidian-interner Ordner.
+            if segs != ["."] and any(s.startswith(".") for s in segs):
+                dirnames[:] = []
                 continue
-            full = _os.path.join(dirpath, fn)
-            rel = _os.path.relpath(full, root)
-            # Datei-Ebene auch gegen Blocklist prüfen
-            try:
-                if _vt._is_blocked(rel):
+            if segs != ["."] and "backups" in segs:
+                dirnames[:] = []
+                continue
+            if segs != ["."]:
+                try:
+                    if _vt._is_blocked(relroot):
+                        dirnames[:] = []
+                        continue
+                except Exception:
+                    pass
+            for fn in filenames:
+                if not fn.endswith(".md"):
                     continue
-            except Exception:
-                pass
-            files.append((rel, full))
-            discovered_paths.add("/" + rel)
+                full = _os.path.join(dirpath, fn)
+                rel = _os.path.relpath(full, root)
+                # Datei-Ebene auch gegen Blocklist prüfen + Vault-Präfix für eindeutige Pfade
+                try:
+                    if _vt._is_blocked(rel):
+                        continue
+                except Exception:
+                    pass
+                vname = _os.path.basename(root)
+                index_path = f"/{vname}/{rel}"
+                if index_path in discovered_paths:
+                    continue
+                files.append((full, index_path))
+                discovered_paths.add(index_path)
 
     # Entferne im Index liegende Pfade, die nicht mehr im Vault sind.
     index = load_index()
@@ -244,24 +251,24 @@ def build_index_from_vault(vault_path=None, quiet=False):
 
     stats = {"indexed": 0, "unchanged": 0, "failed": 0, "chunks": 0, "removed": removed}
     files.sort()
-    log(f"Vault: {root}")
+    log(f"vaults: {', '.join(_os.path.basename(r) for r in roots)}")
     log(f"documents discovered: {len(files)}")
 
-    for rel, full in files:
+    for full, index_path in files:
         try:
             with open(full, encoding="utf-8", errors="replace") as f:
                 content = f.read()
         except OSError as e:
             stats["failed"] += 1
-            log(f"  SKIP lesen: {rel} ({e})")
+            log(f"  SKIP lesen: {index_path} ({e})")
             continue
         title = _os.path.splitext(_os.path.basename(full))[0]
         meta = {"vault": True}
         try:
-            res = index_document(title, "/" + rel, content, meta=meta)
+            res = index_document(title, index_path, content, meta=meta)
         except Exception as e:
             stats["failed"] += 1
-            log(f"  FEHLER: {rel} ({e})")
+            log(f"  FEHLER: {index_path} ({e})")
             continue
         if res.get("status") == "indexed":
             stats["indexed"] += 1

@@ -8,8 +8,23 @@ Nicht in anderen Dateien hart verdrahten — siehe Architektur-Regel.
 import os
 
 # --- Zentrale Pfad-Konfiguration (fest, persönlicher Sandkasten) ---
-# Der primäre Vault, mit dem der Assistent arbeitet.
-VAULT_PATH = "/Users/lxndrhbrt/ObsidianVaults/HSEQ Sync"
+# Mehrere Obsidian-Vaults, mit denen der Assistent arbeitet (Recherche + Wiki-Anlage).
+# Reihenfolge = Priorität für Pfad-Auflösung (erster Eintrag ist der 'Haupt'-Vault).
+# Rechte (per Konvention):
+#   - HSEQ Sync            : Lesen + Schreiben (Audits, Maßnahmenpläne)
+#   - ASI, BS. UWS, QM, EM : Lesen (Facharchiv)
+#   - OpenClaw memory-wiki : Lesen + Schreiben (Wiki selbst anlegen/pflegen)
+#   - Peniel               : Lesen (Projekte)
+# AUSGESCHLOSSEN (Red Line, nie automatisch): Privat, _RECOVERY, .obsidian, backups.
+VAULT_PATHS = [
+    "/Users/lxndrhbrt/ObsidianVaults/HSEQ Sync",
+    "/Users/lxndrhbrt/ObsidianVaults/ASI, BS. UWS, QM, EM",
+    "/Users/lxndrhbrt/ObsidianVaults/OpenClaw memory-wiki",
+    "/Users/lxndrhbrt/ObsidianVaults/Peniel",
+]
+
+# Kompatibilitäts-Alias: erster Eintrag ist der primäre Vault (bisherige API nutzt VAULT_PATH).
+VAULT_PATH = VAULT_PATHS[0]
 
 # Backup-Verzeichnis für Revisionen (vor jeder Schreib-Änderung).
 BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "vault", "backups")
@@ -75,7 +90,7 @@ BLOCKED_DIRS = [
     d.lower().strip()
     for d in os.environ.get(
         "BLOCKED_DIRS",
-        "private,privat,secrets,health,geheim,persönlich,personenbezogen",
+        "private,privat,secrets,health,geheim,persönlich,personenbezogen,recovery,_recovery,recupero",
     ).split(",")
     if d.strip()
 ]

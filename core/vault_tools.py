@@ -25,20 +25,42 @@ from . import config, log
 
 def _resolve_vault_path(relative_or_abs):
     """
-    Löst einen Pfad relativ zum Vault auf und stellt sicher, dass er
-    innerhalb des Vaults bleibt (Block gegen ../-Pfadmanipulation).
+    Löst einen Pfad relativ zu einem der konfigurierten Vaults auf und stellt sicher,
+    dass er innerhalb EINES davon bleibt (Block gegen ../-Pfadmanipulation).
     Liefert absoluten, kanonischen Pfad oder None (unsicher).
     """
-    vault = os.path.realpath(config.VAULT_PATH)
+    vault_roots = [os.path.realpath(v) for v in getattr(config, "VAULT_PATHS", [config.VAULT_PATH])]
     if os.path.isabs(relative_or_abs):
         cand = os.path.realpath(relative_or_abs)
-    else:
-        # Relative Pfade werden auf den Vault bezogen
-        cand = os.path.realpath(os.path.join(vault, relative_or_abs))
-    # Innerhalb des Vaults? (realpath verhindert Symlink-/..-Escape)
-    if cand == vault or cand.startswith(vault + os.sep):
-        return cand
+        for v in vault_roots:
+            if cand == v or cand.startswith(v + os.sep):
+                return cand
+        return None
+    # Relative Pfade werden auf jeden Vault-Root bezogen; der erste Treffer gewinnt.
+    for v in vault_roots:
+        cand = os.path.realpath(os.path.join(v, relative_or_abs))
+        if cand == v or cand.startswith(v + os.sep):
+            return cand
     return None
+
+
+def _root_for_path(abs_path):
+    """Liefert den Vault-Root, zu dem ein absoluter Pfad gehört, oder None."""
+    abs_path = os.path.realpath(abs_path)
+    for v in getattr(config, "VAULT_PATHS", [config.VAULT_PATH]):
+        vr = os.path.realpath(v)
+        if abs_path == vr or abs_path.startswith(vr + os.sep):
+            return vr
+    return None
+
+
+def _rel_to_root(resolved):
+    """Relativer Pfad eines absoluten Vault-Pfads zu seinem Vault-Root (mit Vault-Präfix)."""
+    root = _root_for_path(resolved)
+    if root:
+        rel = os.path.relpath(resolved, root)
+        return os.path.join(os.path.basename(root), rel)
+    return resolved
 
 
 def _safe_md_name(path):
@@ -73,28 +95,31 @@ def search_vault(query, limit=20):
     """
     query_l = query.lower()
     results = []
-    for root, _dirs, files in os.walk(config.VAULT_PATH):
-        # Obsidian-interne Ordner + Backups ausschließen
-        relroot = os.path.relpath(root, config.VAULT_PATH)
-        if any(seg.startswith(".") for seg in relroot.split(os.sep)):
-            continue
-        if "backups" in relroot.split(os.sep):
-            continue
-        if _is_blocked(relroot):
-            continue
-        for fn in files:
-            if not fn.endswith(".md"):
+    vault_roots = getattr(config, "VAULT_PATHS", [config.VAULT_PATH])
+    for vroot in vault_roots:
+        vroot_r = os.path.realpath(vroot)
+        for root, _dirs, files in os.walk(vroot_r):
+            # Obsidian-interne Ordner + Backups ausschließen
+            relroot = os.path.relpath(root, vroot_r)
+            if any(seg.startswith(".") for seg in relroot.split(os.sep)):
                 continue
-            fpath = os.path.join(root, fn)
-            try:
-                with open(fpath, encoding="utf-8", errors="replace") as f:
-                    content = f.read()
-            except OSError:
+            if "backups" in relroot.split(os.sep):
                 continue
-            hits = content.lower().count(query_l)
-            if hits:
-                rel = os.path.relpath(fpath, config.VAULT_PATH)
-                results.append({"path": rel, "hits": hits})
+            if _is_blocked(relroot):
+                continue
+            for fn in files:
+                if not fn.endswith(".md"):
+                    continue
+                fpath = os.path.join(root, fn)
+                try:
+                    with open(fpath, encoding="utf-8", errors="replace") as f:
+                        content = f.read()
+                except OSError:
+                    continue
+                hits = content.lower().count(query_l)
+                if hits:
+                    rel = os.path.relpath(fpath, vroot_r)
+                    results.append({"path": rel, "abs_path": fpath, "vault": os.path.basename(vroot_r), "hits": hits})
     results.sort(key=lambda r: r["hits"], reverse=True)
     log.log("search_vault", query=query, results=len(results))
     return results[:limit]
@@ -105,7 +130,7 @@ def read_note(path):
     resolved = _resolve_vault_path(path)
     if not resolved or not resolved.endswith(".md"):
         raise ValueError(f"Ungültiger oder unsicherer Pfad: {path}")
-    rel = os.path.relpath(resolved, config.VAULT_PATH)
+    rel = _rel_to_root(resolved)
     if _is_blocked(rel):
         raise PermissionError(f"Geschützter Ordner — Zugriff verweigert: {rel}")
     if not os.path.isfile(resolved):
@@ -135,7 +160,7 @@ def create_note(path, content):
     os.makedirs(os.path.dirname(resolved), exist_ok=True)
     with open(resolved, "w", encoding="utf-8") as f:
         f.write(content)
-    rel = os.path.relpath(resolved, config.VAULT_PATH)
+    rel = _rel_to_root(resolved)
     log.log("create_note", path=rel, chars=len(content))
     return {"path": rel, "created": True, "exists": False}
 
@@ -144,7 +169,7 @@ def create_note(path, content):
 
 def _revision_path(resolved):
     """Ermittelt den nächsten Revisions-Pfad für eine Datei."""
-    rel = os.path.relpath(resolved, config.VAULT_PATH)
+    rel = _rel_to_root(resolved)
     stem = rel.replace("/", "__").replace(".md", "")
     return os.path.join(config.BACKUP_DIR, f"{stem}.R{{n}}.md")
 
@@ -202,10 +227,10 @@ def apply_edit(path, new_content):
     os.replace(tmp, resolved)
 
     log.log("apply_edit", path=current["path"], rev=rev,
-            backup=os.path.relpath(backup_file, config.VAULT_PATH),
+            backup=_rel_to_root(backup_file),
             old_chars=len(old_content), new_chars=len(new_content))
     return {"path": current["path"], "applied": True, "rev": rev,
-            "backup": os.path.relpath(backup_file, config.VAULT_PATH)}
+            "backup": _rel_to_root(backup_file)}
 
 
 def _next_revision(relpath):
