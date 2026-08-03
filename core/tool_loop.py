@@ -164,6 +164,18 @@ _ROLE = (
     "- Nenne bei wichtigen Aussagen die Quelle (Dateipfad/Abschnitt), wenn vorhanden.\n"
 )
 
+# Recherche-Pflicht: wird in run()-system UND _call_llm-system verwendet (konsistent).
+_RESEARCH_REQUIREMENT = (
+    "\nRECHERCHE-PFLICHT: Wenn die Nutzerfrage nach einem konkreten Wert fragt "
+    "(z.B. Preis, Datum, Norm, Frist) und die bisherigen Werkzeug-Ergebnisse diesen "
+    "Wert NICHT enthalten oder nur eine vage Quelle liefern, darfst du noch KEINE "
+    "finale Antwort geben. Führe dann mindestens eine weitere, gezielte Suche durch "
+    "(ggf. mit präziserem Suchbegriff, z.B. 'Preis', 'Kosten', Region) oder rufe eine "
+    "passende URL ab (FetchUrl/ExtractUrl). Vergleiche mehrere unabhängige Quellen, "
+    "solange die Rundenzahl es erlaubt. Erwähne niemals nur eine einzelne unzureichende "
+    "Quelle als Beleg, wenn andere Suchergebnisse mehr hergeben."
+)
+
 
 def run(user_message, system_extra=None, confirm=None, max_rounds=MAX_ROUNDS):
     """
@@ -178,7 +190,7 @@ def run(user_message, system_extra=None, confirm=None, max_rounds=MAX_ROUNDS):
         "\n\nWICHTIG: Wenn du ein Werkzeug brauchst, antworte NUR mit JSON "
         "{\"tool\": Name, \"args\": {...}}. Kein Text drumherum. "
         "Wenn KEIN Werkzeug nötig ist, antworte normal auf Deutsch."
-    )
+    ) + _RESEARCH_REQUIREMENT
     if system_extra:
         system += "\n\n" + system_extra
 
@@ -355,7 +367,22 @@ def _fmt_tool_results(tool_results):
     if provider in ("openrouter", "fallback"):
         cap = getattr(config, "EXTERNAL_MAX_CHARS", 4000)
         if cap and len(body) > cap:
-            body = body[:cap] + "\n\n… [Kontext gekürzt von glyph-agent: Datenschutz-Schranke]"
+            # WICHTIG: Bei Platzmangel werfen wir zuerst INTERNEN Vault-Kontext ab und
+            # bewahren die EXTERNEN (Web-)Treffer, die die Frage meist beantworten.
+            # Vorher schnitt body[:cap] hintenweg -> Web-Preise landeten unter dem Cut,
+            # weil Vault-Treffer zuerst kamen (Fehler: 'keine Preise' trotz 13 Web-Treffern).
+            if external and internal:
+                ext_body = "external_sources:\n" + "\n\n".join(external)
+                if len(ext_body) <= cap:
+                    budget_internal = cap - len(ext_body) - 60
+                    int_json = "\n\n".join(internal)
+                    trimmed = int_json[:max(budget_internal, 0)]
+                    body = ("internal_sources:\n" + trimmed +
+                            "\n… [Vault-Kontext gekürzt]\n\n" + ext_body)
+                else:
+                    body = ext_body[:cap] + "\n\n… [Kontext gekürzt von glyph-agent]"
+            else:
+                body = body[:cap] + "\n\n… [Kontext gekürzt von glyph-agent: Datenschutz-Schranke]"
     return body
 
 
@@ -370,7 +397,7 @@ def _call_llm(messages):
             parts.append(f"{'[Nutzer]' if role=='user' else '[Assistent]'}\n{m['content']}")
     # Wir nutzen eine Sitzung mit blossem user-Prompt, System wird getrennt übergeben
     # (Ollama chat würde System+user wollen; hier bündeln wir ins System für stabi­len Loop)
-    system = _ROLE + "\n\n" + tool_registry.tool_schema_prompt()
+    system = _ROLE + "\n\n" + tool_registry.tool_schema_prompt() + _RESEARCH_REQUIREMENT
     # System nur einmal; der eigentliche Loop-Inhalt kommt als user-Text
     user_body = "\n\n".join(
         f"### {('Nutzer' if m['role']=='user' else m['role'].capitalize())}\n{m['content']}"
