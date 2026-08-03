@@ -21,6 +21,14 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# .env früh laden (glyph-agent/.env), damit AGENT_PRIMARY_PROVIDER/OPENROUTER_MODEL/Keys
+# unabhängig vom Startweg greifen (kein stiller Rückfall auf ollama).
+try:
+    from core.dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+
 from core import config, tool_loop, llm
 
 PORT = int(os.environ.get("GLYPH_AGENT_PORT", "18899"))

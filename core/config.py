@@ -59,7 +59,7 @@ else:  # agent
 
 # Ollama läuft lokal auf localhost:11434. Modellname = auswählbar.
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen-solid")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3.5:4b")  # 2026-08-03: von qwen-solid (Qwen2.5-7B) auf qwen3.5:4b gewechselt (schneller, neuere Architektur)
 
 # OpenRouter (optionales Cloud-Modell). Key aus Umgebung/.env — nicht im Code.
 OPENROUTER_URL = os.environ.get("OPENROUTER_URL", "https://openrouter.ai/api/v1")
