@@ -23,12 +23,18 @@ Prinzipien:
 """
 import os
 
-# Klare Aktualitäts-Signale in der Frage -> Web darf direkt dazukommen.
+# Klare Aktualitäts-/Web-Signale in der Frage -> WebSearch darf direkt dazukommen.
+# Umfasst explizit Preis-/Markt-/Extern-Themen: Der Vault enthält selten aktuelle
+# Preise/Normen/Regelungen; solche Fragen brauchen externe Recherche auch bei Vault-Treffer.
 CURRENCY_SIGNALS = (
     "heute", "aktuell", "aktuelle", "aktuellen", "geltend", "geltende",
     "2026", "2025", "2027", "neu", "neue", "neueste", "Normen", "Norm",
     "Vorschriften", "Vorschrift", "Richtlinie", "Richtlinien", "vorgaben",
     "pflichten", "frist", "fristen", "letzter stand", "verordnung",
+    # Externe/Markt-/aktualitätsbezogen: Preis, Kosten, Kauf, Vergütung, Markt
+    "preis", "preise", "kosten", "kostet", "kaufen", "welpe", "welpenpreis",
+    "vergleich", "markt", "angebot", "rabatt", "vergütung", "honorar",
+    "gehalt", "lohn", "miete", "tarif", "gebühr", "gebühren", "rechnung",
 )
 
 
