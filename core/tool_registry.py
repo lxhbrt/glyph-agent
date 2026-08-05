@@ -18,8 +18,26 @@ from . import vault_tools, web, retrieval
 
 TOOLS = [
     {
+        "name": "VaultFind",
+        "description": (
+            "EIN Finde-Werkzeug für den Obsidian-Vault (B+ Hybrid): "
+            "0.7 lokale Embeddings (bge-m3) + 0.3 Keyword-Volltext. "
+            "NUR Vault-Daten, KEINE Web-Recherche. Bevorzugt dieses Tool für alle Vault-Fragen."
+        ),
+        "args": {"query": "str", "top_k": "int (optional)", "min_score": "float (optional)"},
+        "write": False,
+    },
+    {
+        # Alias → VaultFind (Abwärtskompatibilität)
+        "name": "VaultRecall",
+        "description": "Alias für VaultFind (Hybrid Embedding+Keyword). Bevorzuge VaultFind.",
+        "args": {"query": "str", "top_k": "int (optional)", "min_score": "float (optional)"},
+        "write": False,
+    },
+    {
+        # Alias → VaultFind
         "name": "VaultSearch",
-        "description": "Durchsucht den Obsidian-Vault nach einem Begriff.",
+        "description": "Alias für VaultFind (Hybrid). Bevorzuge VaultFind.",
         "args": {"query": "str", "limit": "int (optional, Default 10)"},
         "write": False,
     },
@@ -54,27 +72,33 @@ TOOLS = [
         "write": True,
     },
     {
-        "name": "VaultRecall",
-        "description": "Semantische Suche im Obsidian-Vault (lokale Embeddings). NUR Vault-Daten, KEINE Web-Recherche.",
-        "args": {"query": "str", "top_k": "int (optional)", "min_score": "float (optional)"},
-        "write": False,
-    },
-    {
         "name": "WebSearch",
-        "description": "Kontrollierte Web-Recherche via Exa oder TinyFish. NUR anonymisierte Suchbegriffe senden.",
+        "description": (
+            "Grobe Web-Recherche (Standard: Exa). NUR anonymisierte Suchbegriffe. "
+            "source=tinyfish nur als Zweitquelle. Für konkrete URLs: ExtractUrl/FetchUrl."
+        ),
         "args": {"query": "str, anonymisierter Suchbegriff", "count": "int (optional)", "source": "str (optional: 'exa' oder 'tinyfish')"},
         "write": False,
     },
     {
         "name": "ExtractUrl",
-        "description": "Besucht eine URL und extrahiert gezielt strukturierte Daten als JSON (TinyFish). NUR öffentliche URLs.",
+        "description": "FEINE Recherche: URL besuchen + strukturierte Daten (TinyFish). NUR öffentliche URLs.",
         "args": {"url": "str", "goal": "str, was extrahiert werden soll (mit JSON-Schema)"},
         "write": False,
     },
     {
         "name": "FetchUrl",
-        "description": "Holt den Inhalt einer öffentlichen URL als Markdown/Text (TinyFish).",
+        "description": "FEINE Recherche: öffentlichen URL-Inhalt als Markdown/Text (TinyFish).",
         "args": {"url": "str"},
+        "write": False,
+    },
+    {
+        "name": "ObsidianOpen",
+        "description": (
+            "Optional: öffnet eine Vault-Notiz in der Obsidian-App (kepano-CLI). "
+            "Nur Pfade innerhalb erlaubter Vaults. Schreibt nichts."
+        ),
+        "args": {"path": "str, relativer oder vault-relativer .md-Pfad"},
         "write": False,
     },
 ]
@@ -157,8 +181,12 @@ def execute(tool_name, args, confirm=None):
                     "error": "Schreib-Vorgang vom Nutzer abgebrochen."}
 
     try:
-        if tool_name == "VaultSearch":
-            res = vault_tools.search_vault(args.get("query", ""), limit=int(args.get("limit", 10)))
+        if tool_name in ("VaultFind", "VaultRecall", "VaultSearch"):
+            # Ein Hybrid-Werkzeug; Aliase teilen dieselbe Implementierung.
+            q = args.get("query", "")
+            top_k = int(args.get("top_k") or args.get("limit") or 4)
+            min_score = float(args.get("min_score", 0.35))
+            res = retrieval.vault_find(q, top_k=top_k, min_score=min_score)
             return {"ok": True, "result": res}
         if tool_name == "ReadNote":
             res = vault_tools.read_note(args.get("path"))
@@ -178,13 +206,6 @@ def execute(tool_name, args, confirm=None):
         if tool_name == "ApplyEdit":
             res = vault_tools.apply_edit(args.get("path"), args.get("new_content", ""))
             return {"ok": True, "result": res}
-        if tool_name == "VaultRecall":
-            res = retrieval.search(
-                args.get("query", ""),
-                top_k=int(args.get("top_k", 4)),
-                min_score=float(args.get("min_score", 0.6)),
-            )
-            return {"ok": True, "result": res}
         if tool_name == "WebSearch":
             res = web.web_search(
                 args.get("query", ""),
@@ -197,6 +218,9 @@ def execute(tool_name, args, confirm=None):
             return {"ok": True, "result": res}
         if tool_name == "FetchUrl":
             res = web.fetch_tinyfish(args.get("url", ""), "markdown")
+            return {"ok": True, "result": res}
+        if tool_name == "ObsidianOpen":
+            res = vault_tools.obsidian_open(args.get("path", ""))
             return {"ok": True, "result": res}
     except Exception as e:
         return {"ok": False, "result": None, "error": str(e)}

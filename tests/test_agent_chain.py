@@ -43,10 +43,13 @@ def run_chain(search_results, llm_script):
 
     web.web_search = lambda query, count=5, source="exa": search_results
     # Precheck-Vault: leer -> WebSearch wird nachgezogen (gewolltes Routing-Verhalten).
-    retrieval_mod.search = lambda query, top_k=None, min_score=None: {
-        "status": "empty", "query": query, "candidates": 0, "selected": 0,
-        "threshold": 0.6, "sources": [], "results": [],
-    }
+    def _empty_vault(query, top_k=None, min_score=None, **kw):
+        return {
+            "status": "empty", "query": query, "candidates": 0, "selected": 0,
+            "threshold": 0.6, "sources": [], "results": [],
+        }
+    retrieval_mod.vault_find = _empty_vault
+    retrieval_mod.search = _empty_vault
     calls = {"n": 0}
 
     def fake_chat(system, user, temperature=0.3, num_ctx=8192):
@@ -96,6 +99,12 @@ def test_2_tool_aufruf_und_propagation():
     web.web_search = lambda query, count=5, source="exa": [
         {"title": "Setup-Guide", "url": "https://example.com/setup", "snippet": "Empfohlen: Konfig A."}
     ]
+    def _empty_vault(query, top_k=None, min_score=None, **kw):
+        return {
+            "status": "empty", "query": query, "candidates": 0, "selected": 0,
+            "threshold": 0.6, "sources": [], "results": [],
+        }
+    retrieval_mod.vault_find = _empty_vault
     _orig_retr = retrieval_mod.search
     retrieval_mod.search = lambda query, top_k=None, min_score=None: {
         "status": "empty", "query": query, "candidates": 0, "selected": 0,
@@ -130,11 +139,14 @@ def test_3_fehlerfall_leeres_ergebnis():
     import core.retrieval as retrieval_mod
 
     web.web_search = lambda query, count=5, source="exa": []
+    def _empty_vault(query, top_k=None, min_score=None, **kw):
+        return {
+            "status": "empty", "query": query, "candidates": 0, "selected": 0,
+            "threshold": 0.6, "sources": [], "results": [],
+        }
+    retrieval_mod.vault_find = _empty_vault
     _orig_retr = retrieval_mod.search
-    retrieval_mod.search = lambda query, top_k=None, min_score=None: {
-        "status": "empty", "query": query, "candidates": 0, "selected": 0,
-        "threshold": 0.6, "sources": [], "results": [],
-    }
+    retrieval_mod.search = _empty_vault
     orig = llm_mod.chat
 
     def fake_chat(system, user, temperature=0.3, num_ctx=8192):
@@ -165,11 +177,14 @@ def test_4_e2e_assertion():
         {"title": "T", "url": "https://example.com/t", "snippet": "Fakt Y"}
     ]
     # Vault-Precheck: leer -> WebSearch relevant (Routing-Verhalten).
+    def _empty_vault(query, top_k=None, min_score=None, **kw):
+        return {
+            "status": "empty", "query": query, "candidates": 0, "selected": 0,
+            "threshold": 0.6, "sources": [], "results": [],
+        }
+    retrieval_mod.vault_find = _empty_vault
     _orig_retr = retrieval_mod.search
-    retrieval_mod.search = lambda query, top_k=None, min_score=None: {
-        "status": "empty", "query": query, "candidates": 0, "selected": 0,
-        "threshold": 0.6, "sources": [], "results": [],
-    }
+    retrieval_mod.search = _empty_vault
     orig = llm_mod.chat
 
     def fake_chat(system, user, temperature=0.3, num_ctx=8192):

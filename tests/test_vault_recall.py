@@ -4,7 +4,7 @@
 Vault-Recall-Tests (Stufe B) — Nutzer-Spezifikation (10 Fälle).
 
 Testet core/retrieval.py mit isoliertem Index (temporärer Pfad), lokalen Embeddings
-(nomic-embed-text via Ollama). Aufruf: python3 tests/test_vault_recall.py
+(bge-m3 via Ollama). Aufruf: python3 tests/test_vault_recall.py
 """
 import os
 import sys

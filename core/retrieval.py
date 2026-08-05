@@ -2,7 +2,7 @@
 """
 Vault-Recall (Stufe B): semantische Suche über den Vault mit lokalen Embeddings.
 
-- Embeddings: nomic-embed-text via Ollama (lokal, DSGVO-sauber, modellunabhängig).
+- Embeddings: bge-m3 via Ollama (lokal, DSGVO-sauber, modellunabhängig).
 - Vektorindex: persistent in einer JSON-Datei (Embedding + Metadaten), Hash-basiert.
 - Retrieval: Kosinus-Ähnlichkeit, top_k + Mindestschwellwert (konfigurierbar).
 - Quellen bleiben in den Treffern erhalten (Dokument, Titel, Pfad, Abschnitt).
@@ -18,7 +18,7 @@ import urllib.request
 
 from . import config
 
-EMBED_MODEL = os.environ.get("EMBED_MODEL", "nomic-embed-text")
+EMBED_MODEL = os.environ.get("EMBED_MODEL", "bge-m3")
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 # Vektorindex-Datei (unter logs/, leicht, persistiert zwischen Läufen).
 INDEX_PATH = os.path.join(
@@ -359,6 +359,9 @@ def search(query, top_k=None, min_score=None):
         (damit ein Boost Rang 24 noch erreichen kann).
       - FINAL_K (5): nach Hybrid-Reranking ausgelieferte Treffer.
     Die Schwelle (0.6) bleibt unverändert und wird NACH dem Boost angewendet.
+
+    Hinweis: Für das kanonische B+-Finde-Werkzeug siehe vault_find()
+    (0.7 Embedding + 0.3 Keyword-Volltext, OpenClaw-Vorbild).
     """
     import os
     if top_k is None:
@@ -411,4 +414,134 @@ def search(query, top_k=None, min_score=None):
         "top_k": final_k,
         "candidate_k": candidate_k,
         "error": None,
+    }
+
+
+# --- B+ VaultFind: 0.7 Embedding + 0.3 Keyword (OpenClaw hybrid) ------------
+
+def vault_find(query, top_k=None, min_score=None,
+               vector_weight=None, text_weight=None):
+    """
+    Kanonisches Finde-Werkzeug (B+).
+
+    Mischt:
+      - semantische Treffer aus dem Embedding-Index (Gewicht vector_weight, Default 0.7)
+      - Keyword-Treffer aus dem Vault-Volltext (Gewicht text_weight, Default 0.3)
+
+    Liefert dasselbe Schema wie search(), plus mode='hybrid' und keyword_hits.
+    VaultRecall/VaultSearch rufen dies intern auf (ein Werkzeug, zwei Aliase).
+    """
+    import os
+    from . import vault_tools
+
+    if top_k is None:
+        top_k = int(os.environ.get("VAULT_TOP_K", "4"))
+    if min_score is None:
+        min_score = float(os.environ.get("VAULT_MIN_SCORE", "0.35"))
+    if vector_weight is None:
+        vector_weight = float(os.environ.get("VAULT_VECTOR_WEIGHT", "0.7"))
+    if text_weight is None:
+        text_weight = float(os.environ.get("VAULT_TEXT_WEIGHT", "0.3"))
+    # Normieren
+    wsum = (vector_weight or 0) + (text_weight or 0) or 1.0
+    vw, tw = vector_weight / wsum, text_weight / wsum
+
+    # --- Embedding-Zweig (niedrigere Schwelle: Merge entscheidet) ---
+    sem = search(query, top_k=max(top_k * 3, 12), min_score=0.0)
+    vec_by_path = {}
+    for r in (sem.get("results") or []):
+        p = r.get("path")
+        if not p:
+            continue
+        # vector_score bevorzugen, sonst score
+        vs = float(r.get("vector_score") if r.get("vector_score") is not None else r.get("score") or 0)
+        if p not in vec_by_path or vs > vec_by_path[p]["vector"]:
+            vec_by_path[p] = {"vector": vs, "meta": r}
+
+    # --- Keyword-Zweig ---
+    kw_raw = []
+    try:
+        kw_raw = vault_tools.search_vault(query, limit=max(top_k * 5, 20)) or []
+    except Exception:
+        kw_raw = []
+    max_hits = max((int(h.get("hits") or 0) for h in kw_raw), default=0) or 1
+    kw_by_path = {}
+    for h in kw_raw:
+        # search_vault liefert rel path; Index nutzt oft /VaultName/rel
+        rel = h.get("path") or ""
+        vault = h.get("vault") or ""
+        candidates_paths = [rel]
+        if vault:
+            candidates_paths.append(f"/{vault}/{rel}".replace("//", "/"))
+            candidates_paths.append(f"{vault}/{rel}")
+        score_kw = min(1.0, float(h.get("hits") or 0) / float(max_hits))
+        for p in candidates_paths:
+            if p and (p not in kw_by_path or score_kw > kw_by_path[p]):
+                kw_by_path[p] = score_kw
+
+    # Pfade matchen: Keyword-rel → besten Index-Pfad
+    def _kw_score_for_index_path(ipath):
+        if ipath in kw_by_path:
+            return kw_by_path[ipath]
+        best = 0.0
+        for kp, sc in kw_by_path.items():
+            if ipath.endswith(kp) or kp in ipath or ipath.endswith("/" + kp.lstrip("/")):
+                best = max(best, sc)
+        return best
+
+    all_paths = set(vec_by_path.keys())
+    # Keyword-only Pfade (noch nicht im Index) auch aufnehmen
+    for kp in kw_by_path:
+        # nur wenn schon ein Index-Pfad matched, sonst als keyword-only
+        matched = False
+        for ip in vec_by_path:
+            if ip.endswith(kp) or kp in ip:
+                matched = True
+                break
+        if not matched:
+            all_paths.add(kp)
+
+    merged = []
+    for p in all_paths:
+        v = vec_by_path.get(p, {}).get("vector", 0.0)
+        if p in vec_by_path:
+            k = _kw_score_for_index_path(p)
+            meta = vec_by_path[p]["meta"]
+        else:
+            k = kw_by_path.get(p, 0.0)
+            meta = {"path": p, "title": p.rsplit("/", 1)[-1], "section": "", "text": ""}
+        hybrid = vw * float(v) + tw * float(k)
+        if hybrid < min_score and float(v) < min_score and float(k) < 0.5:
+            continue
+        entry = {
+            "path": meta.get("path") or p,
+            "title": meta.get("title"),
+            "section": meta.get("section"),
+            "text": meta.get("text"),
+            "score": round(hybrid, 4),
+            "vector_score": round(float(v), 4),
+            "keyword_score": round(float(k), 4),
+            "vector_weight": vw,
+            "text_weight": tw,
+        }
+        merged.append(entry)
+
+    merged.sort(key=lambda x: x["score"], reverse=True)
+    selected = merged[:top_k]
+    sources = sorted({r["path"] for r in selected if r.get("path")})
+    status = "success" if selected else ("empty" if not vec_by_path and not kw_raw else "empty")
+    return {
+        "status": status,
+        "query": query,
+        "mode": "hybrid",
+        "candidates": len(all_paths),
+        "selected": len(selected),
+        "threshold": min_score,
+        "sources": sources,
+        "results": selected,
+        "top_k": top_k,
+        "keyword_hits": len(kw_raw),
+        "vector_weight": vw,
+        "text_weight": tw,
+        "error": sem.get("error"),
     }

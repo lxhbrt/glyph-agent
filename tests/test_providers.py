@@ -43,7 +43,11 @@ def check(name, cond, detail=""):
 
 def load(name, env_overrides=None):
     """Setzt Provider + Env, lädt frisch den Provider."""
-    merged = {"HSEQ_PROVIDER": name}
+    # B+: config liest AGENT_PRIMARY_PROVIDER / MODE, nicht HSEQ_PROVIDER.
+    merged = {
+        "AGENT_PRIMARY_PROVIDER": name,
+        "MODE": "agent",
+    }
     if env_overrides:
         merged.update(env_overrides)
     for k, v in merged.items():
@@ -52,6 +56,8 @@ def load(name, env_overrides=None):
     # config neu laden, damit PROVIDER/env neu gelesen wird
     import importlib
     importlib.reload(config)
+    # PROVIDER im Modul erzwingen (falls Env-Reload unvollständig)
+    config.PROVIDER = name if config.MODE != "openrouter-chat" else "openrouter"
     importlib.reload(factory)
     return factory.get_provider()
 

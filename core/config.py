@@ -32,49 +32,44 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "vau
 # Protokoll-/Log-Datei (JSON-Lines) für alle Aktionen.
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs", "actions.jsonl")
 
-# --- Modell-Runtime ---
-# Betriebsart (klar getrennt, zwei Modi):
-#   "agent"         : Agentenmodus — lokaler Agent (Qwen) greift auf Wiki/Tools zu,
-#                     OpenRouter formuliert bevorzugt; Fallback-Kette im Agentenmodus:
-#                     bevorzugtes OpenRouter-Modell -> kostenloses OpenRouter-Modell -> Qwen lokal.
-#   "openrouter-chat": reine Chat-Oberfläche OHNE Wiki-/Tool-/Vault-Zugriff; nur OpenRouter,
-#                     optional Fallback auf ein kostenloses OpenRouter-Modell (KEIN Qwen-Wechsel).
+# --- Modell-Runtime (B+, Stand 2026-08-05) ---
+# Betriebsart:
+#   "agent"          : VaultFind + optional Web, Antwort durch Cloud-Denker (OpenRouter).
+#   "openrouter-chat": reine Chat-Oberfläche OHNE Wiki/Tools.
+# Siehe CONSTITUTION.md — Qwen ist KEIN Chat-Standard mehr (Ollama nur für Embeddings bge-m3).
 MODE = os.environ.get("MODE", "agent").lower()
 
-# --- Agentenmodus (MODE=agent): Provider- und Fallback-Kette ---
-# AGENT_PRIMARY_PROVIDER: "openrouter" (bevorzugt) | "ollama" (lokal, kein Cloud-Versuch)
-AGENT_PRIMARY_PROVIDER = os.environ.get("AGENT_PRIMARY_PROVIDER", "ollama")
-# Bevorzugtes OpenRouter-Modell für den Agentenmodus.
-# Abgestimmt mit Nutzer: openai/gpt-5.6-luna (wird in OpenRouter als „max“ angezeigt,
-# gleichwertig zu DeepSeek V4 Flash). Preis identisch zu luna-pro.
+# --- Agentenmodus (MODE=agent) ---
+# B+-Default: openrouter (Cloud-Denker). "ollama" nur noch für Experimente (nicht empfohlen).
+# "fallback" = explizite 3-Stufen-Kette OpenRouter → :free → optional lokal (NICHT B+-Default).
+AGENT_PRIMARY_PROVIDER = os.environ.get("AGENT_PRIMARY_PROVIDER", "openrouter")
 AGENT_OPENROUTER_MODEL = os.environ.get("AGENT_OPENROUTER_MODEL", "openai/gpt-5.6-luna")
-# Kostenloses OpenRouter-Fallback-Modell (Modellwechsel INNERHALB von OpenRouter).
-# Verifizierte, real existierende :free-ID (via OpenRouter /models):
-AGENT_OPENROUTER_FALLBACK_MODEL = os.environ.get("AGENT_OPENROUTER_FALLBACK_MODEL", "inclusionai/ling-3.0-flash:free")
-# Lokaler Fallback (nur Agentenmodus): wenn OpenRouter insgesamt ausfällt -> lokales Modell.
+AGENT_OPENROUTER_FALLBACK_MODEL = os.environ.get(
+    "AGENT_OPENROUTER_FALLBACK_MODEL", "inclusionai/ling-3.0-flash:free"
+)
+# Nur relevant wenn PROVIDER=fallback (explizit). B+ nutzt das nicht.
 AGENT_LOCAL_FALLBACK_PROVIDER = os.environ.get("AGENT_LOCAL_FALLBACK_PROVIDER", "ollama")
 
 # --- OpenRouter-Chat-Modus (MODE=openrouter-chat) ---
 OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "openai/gpt-5.6-luna")
-OPENROUTER_FALLBACK_MODEL = os.environ.get("OPENROUTER_FALLBACK_MODEL", "inclusionai/ling-3.0-flash:free")
-# Im OpenRouter-Chat-Modus sind Tools/Vault IMMER deaktiviert (sichere Defaults, überschreibbar
-# nur, falls du es bewusst anders willst — nicht empfohlen):
+OPENROUTER_FALLBACK_MODEL = os.environ.get(
+    "OPENROUTER_FALLBACK_MODEL", "inclusionai/ling-3.0-flash:free"
+)
 OPENROUTER_ALLOW_TOOLS = os.environ.get("OPENROUTER_ALLOW_TOOLS", "false").lower() == "true"
 OPENROUTER_ALLOW_VAULT = os.environ.get("OPENROUTER_ALLOW_VAULT", "false").lower() == "true"
 
-# Provider-Auswahl (intern, kompatibel zur bisherigen Schnittstelle):
-#   "ollama"     : nur lokales Qwen (offline, kostenlos, DSGVO-sicher)
-#   "openrouter" : nur Cloud-Modell (kostenpflichtig; nur Tool-Loop-minimierte Ausschnitte)
-#   "fallback"   : erst OpenRouter (mit gratis-Modell-Stufe), bei Gesamtfehler automatisch lokal
-# Im Agentenmodus wird AGENT_PRIMARY_PROVIDER verwendet; im openrouter-chat nur openrouter.
+# Provider-Auswahl:
+#   "openrouter" : B+-Standard — Cloud-Denker, kein lokaler Chat-Fallback
+#   "fallback"   : nur wenn explizit gesetzt (OpenRouter → free → lokal)
+#   "ollama"     : veraltet für Chat (Embeddings laufen separat über bge-m3)
 if MODE == "openrouter-chat":
     PROVIDER = "openrouter"
-else:  # agent
+else:
     PROVIDER = AGENT_PRIMARY_PROVIDER
 
-# Ollama läuft lokal auf localhost:11434. Modellname = auswählbar.
+# Ollama: für Chat nur noch optional; Embeddings nutzen OLLAMA_URL + bge-m3 (retrieval.py).
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3.5:4b")  # 2026-08-03: von qwen-solid (Qwen2.5-7B) auf qwen3.5:4b gewechselt (schneller, neuere Architektur)
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3.5:4b")  # nur bei PROVIDER=ollama/fallback
 
 # OpenRouter (optionales Cloud-Modell). Key aus Umgebung/.env — nicht im Code.
 OPENROUTER_URL = os.environ.get("OPENROUTER_URL", "https://openrouter.ai/api/v1")

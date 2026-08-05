@@ -264,3 +264,92 @@ def list_backups():
         if fn.endswith(".md"):
             out.append(fn)
     return out
+
+
+# --- Optional: Obsidian CLI (kepano) unter Sicherheitsdach --------------------
+
+def _obsidian_bin():
+    """Pfad zur obsidian-CLI (Homebrew oder PATH), oder None."""
+    import shutil
+    for cand in (
+        os.environ.get("OBSIDIAN_CLI"),
+        "/opt/homebrew/bin/obsidian",
+        "/usr/local/bin/obsidian",
+        shutil.which("obsidian"),
+    ):
+        if cand and os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    return None
+
+
+def obsidian_open(path):
+    """
+    Öffnet eine Notiz in der Obsidian-App über die offizielle CLI (kepano).
+
+    Sicherheit:
+      - Pfad muss innerhalb eines erlaubten Vaults auflösbar sein (_resolve_vault_path)
+      - BLOCKED_DIRS greifen wie bei read_note
+      - Kein freier Shell-String aus dem Modell — nur fester CLI-Aufruf
+      - Wenn CLI fehlt: klarer Fehler, kein Crash
+
+    Liefert {ok, path, vault, opened, message}.
+    """
+    import subprocess
+    if not path:
+        raise ValueError("Pfad fehlt.")
+    resolved = _resolve_vault_path(path)
+    if not resolved or not resolved.endswith(".md"):
+        raise ValueError(f"Ungültiger oder unsicherer Pfad: {path}")
+    rel = _rel_to_root(resolved)
+    if _is_blocked(rel):
+        raise PermissionError(f"Geschützter Ordner — Obsidian-Open verweigert: {rel}")
+    if not os.path.isfile(resolved):
+        raise FileNotFoundError(f"Notiz nicht gefunden: {path}")
+
+    root = _root_for_path(resolved)
+    vault_name = os.path.basename(root) if root else ""
+    # Relativ zum Vault-Root (Obsidian will vault-interne Pfade)
+    note_in_vault = os.path.relpath(resolved, root) if root else path
+    note_in_vault = note_in_vault.replace("\\", "/")
+
+    bin_path = _obsidian_bin()
+    if not bin_path:
+        log.log("obsidian_open_skipped", path=rel, reason="cli_missing")
+        return {
+            "ok": False,
+            "opened": False,
+            "path": rel,
+            "vault": vault_name,
+            "message": "Obsidian-CLI nicht gefunden (obsidian binary). "
+                       "In Obsidian: Settings → Advanced → Command line interface aktivieren.",
+        }
+
+    # CLI: obsidian open <file>  bzw. mit vault — Versionen variieren; try open path
+    try:
+        # Bevorzugt: URI-Schema open (funktioniert auch ohne CLI-Subcommands)
+        # obsidian "obsidian://open?vault=...&file=..."
+        from urllib.parse import quote
+        uri = f"obsidian://open?vault={quote(vault_name)}&file={quote(note_in_vault)}"
+        subprocess.run(
+            ["open", uri],
+            check=False,
+            capture_output=True,
+            timeout=10,
+        )
+        log.log("obsidian_open", path=rel, vault=vault_name, via="uri")
+        return {
+            "ok": True,
+            "opened": True,
+            "path": rel,
+            "vault": vault_name,
+            "message": f"Obsidian geöffnet: {vault_name} / {note_in_vault}",
+        }
+    except Exception as e:
+        log.log("obsidian_open_error", path=rel, error=str(e))
+        return {
+            "ok": False,
+            "opened": False,
+            "path": rel,
+            "vault": vault_name,
+            "message": f"Obsidian-Open fehlgeschlagen: {e}",
+        }

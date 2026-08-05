@@ -35,15 +35,18 @@ def check(name, cond, detail=""):
 
 def run_loop_with(user_message, vault, web_results, llm_script, current=False):
     """Führt tool_loop.run mit vollständig gemockten Quellen + LLM aus.
-    vault: retrieval.search()-Ergebnis (dict) zum Mocken des Precheck-Such.
+    vault: vault_find()/search()-Ergebnis (dict) zum Mocken des Precheck-Such.
     web_results: Liste von WebSearch-Treffern."""
     from core import tool_loop
     import core.web as web
     import core.llm as llm_mod
     import core.retrieval as retrieval_mod
 
+    # B+: Precheck nutzt vault_find; search bleibt für Alias-Kompatibilität gemockt.
+    retrieval_mod.vault_find = lambda query, top_k=None, min_score=None, **kw: vault
     retrieval_mod.search = lambda query, top_k=None, min_score=None: vault
     web.web_search = lambda query, count=5, source="exa": web_results
+    web.extract_tinyfish = lambda url, goal: {"ok": True, "url": url}
     calls = {"n": 0}
 
     def fake_chat(system, user, temperature=0.3, num_ctx=8192):
@@ -71,9 +74,8 @@ def test_1_vault_ausreichend():
         llm_script=["Antwort aus Doku: Brandschutzregeln (Quelle /wiki/Brandschutz.md)."],
     )
     trace = res.get("trace") or {}
-    # Routing musste VaultRecall als Precheck gesetzt haben; WebSearch darf NICHT laufen,
-    # da Vault ausreichend + domain.
-    check("VaultRecall im Precheck", any(t.get("tool") == "VaultRecall" for t in res.get("tool_calls", [])), "true")
+    # Routing: VaultFind-Precheck; WebSearch darf NICHT laufen (Vault ausreichend + domain).
+    check("VaultFind im Precheck", any(t.get("tool") in ("VaultFind", "VaultRecall") for t in res.get("tool_calls", [])), "true")
     check("kein WebSearch (ausreichend)", not any(t.get("tool") == "WebSearch" for t in res.get("tool_calls", [])), "true")
     check("sources.vault.count >= 1", (trace.get("sources") or {}).get("vault", {}).get("count", 0) >= 1, "true")
     # web-Block nur, wenn WebSearch lief -> hier NICHT vorhanden
@@ -101,7 +103,7 @@ def test_2_vault_leer_web_gezogen():
         ],
     )
     trace = res.get("trace") or {}
-    check("VaultRecall-Precheck lief", any(t.get("tool") == "VaultRecall" for t in res.get("tool_calls", [])), "true")
+    check("VaultFind-Precheck lief", any(t.get("tool") in ("VaultFind", "VaultRecall") for t in res.get("tool_calls", [])), "true")
     check("WebSearch nachgezogen", any(t.get("tool") == "WebSearch" for t in res.get("tool_calls", [])), "true")
     srcs = trace.get("sources") or {}
     check("sources.vault.empty", srcs.get("vault", {}).get("status") == "empty", f"-> {srcs.get('vault',{}).get('status')}")

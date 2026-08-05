@@ -1,57 +1,37 @@
-# glyph-agent — persönlicher lokaler Obsidian-Assistent
+# glyph-agent — persönlicher lokaler Obsidian-Assistent (B+)
 
-Ein schlanker, **DSGVO-bewusster** Assistent, der mit deinem Obsidian-Vault arbeitet.
-Standardmäßig **komplett lokal** über Ollama (Qwen). Optional kann der Agentenmodus ein
-OpenRouter-Cloud-Modell zur Antwortformulierung nutzen (mit lokalem Fallback), und es gibt
-einen davon getrennten reinen OpenRouter-Chat-Modus **ohne** Vault-/Tool-Zugriff.
+Schlanker Agent: **lokales Vault-Gedächtnis** + **Cloud-Denker** (OpenRouter).
+Spielregeln: [`CONSTITUTION.md`](./CONSTITUTION.md).
 
-## Zwei getrennte Betriebsarten
+## Architektur B+ (aktuell)
+
+```text
+Nutzerfrage
+  → VaultFind (Hybrid: 0.7 Embedding bge-m3 + 0.3 Keyword)   [lokal]
+  → Web bei Bedarf: Exa = grob · TinyFish = fein              [API]
+  → OpenRouter openai/gpt-5.6-luna formuliert                [Cloud]
+  → Antwort + Trace/Steps
+```
+
+**Qwen ist kein Chat-Modell mehr.** Ollama läuft nur noch für **Embeddings** (`bge-m3`).
+
+## Zwei Betriebsarten
 
 | MODE | Bedeutung | Standard |
 |------|-----------|----------|
-| `agent` | **Agentenmodus** — lokaler Agent greift auf Wiki/Tools zu | `agent/ollama` *(voll lokal)* |
-| `openrouter-chat` | **Reine Chat-Oberfläche** — kein Wiki/Vault/Tools | keine Agentenrechte |
+| `agent` | VaultFind + Tools + Cloud-Antwort | `agent` + `openrouter` |
+| `openrouter-chat` | Reiner Chat — kein Wiki/Vault/Tools | — |
 
-> **Wichtig:** `MODE=agent` bedeutet **NICHT** automatisch OpenRouter. Der tatsächliche
-> Standard ist `MODE=agent` + `AGENT_PRIMARY_PROVIDER=ollama` → **komplett lokaler Betrieb**.
-> OpenRouter wird erst aktiv, wenn `AGENT_PRIMARY_PROVIDER=openrouter` (siehe unten).
+### Provider (ehrlich)
 
-### Agentenmodus (`MODE=agent`)
+| `AGENT_PRIMARY_PROVIDER` | Verhalten |
+|--------------------------|-----------|
+| **`openrouter`** (B+-Default) | Nur Cloud-Denker. **Kein** automatischer Qwen-Fallback. |
+| `fallback` | **Nur wenn explizit gesetzt:** OpenRouter → `:free` → optional lokal. |
+| `ollama` | Veraltet für Chat (nicht empfohlen). |
 
-Der lokale Agent kontrolliert Wiki-zugriff, Dateisuche, Tool-Aufrufe, Kontextauswahl,
-Schreibbestätigung und den Fallback. Antwortkette, wenn OpenRouter als primärer Provider
-gesetzt ist:
-
-```text
-1. bevorzugtes OpenRouter-Modell      (AGENT_OPENROUTER_MODEL)
-2. kostenloses OpenRouter-Modell      (AGENT_OPENROUTER_FALLBACK_MODEL, z. B. ...:free)
-3. lokales Qwen                       (AGENT_LOCAL_FALLBACK_PROVIDER)
-```
-
-Ist der Primär-Provider `ollama`, wird **keine** Cloud angefragt (lokaler Datenschutzmodus).
-
-### Reiner OpenRouter-Chat (`MODE=openrouter-chat`)
-
-Vollständig getrennt vom Agenten: **kein** Vault-Zugriff, **keine** lokalen Tools, **kein**
-Wiki-Kontext, **kein** automatischer Wechsel zu Qwen. Bei OpenRouter-Ausfall nur eine
-Fehlermeldung. Nur Chat (`OPENROUTER_MODEL` → optional `OPENROUTER_FALLBACK_MODEL`).
-
-## Betriebszustände im Überblick
-
-```text
-MODE=agent + AGENT_PRIMARY_PROVIDER=ollama
-→ Agent arbeitet vollständig lokal (Standard, DSGVO-sicher)
-
-MODE=agent + AGENT_PRIMARY_PROVIDER=openrouter
-→ bevorzugtes OpenRouter-Modell → kostenloses OpenRouter-Modell → lokales Qwen
-
-MODE=openrouter-chat
-→ reine OpenRouter-Chat-Oberfläche; kein lokaler Zugriff; kein Qwen-Fallback
-```
-
-**MODE vs. AGENT_PRIMARY_PROVIDER:** `MODE` wählt die Betriebsart (Agentenmodus vs.
-Chat-Oberfläche). `AGENT_PRIMARY_PROVIDER` wählt *innerhalb* des Agentenmodus, ob lokal
-(`ollama`) oder mit Cloud-Formulierung (`openrouter`) gearbeitet wird.
+> Frühere Doku behauptete „immer 3 Stufen bei openrouter“ — das war **falsch**.
+> Die 3-Stufen-Kette existiert nur bei `PROVIDER=fallback`.
 
 ## Architektur-Prinzip
 
@@ -140,10 +120,10 @@ Alle Werte in `core/config.py` bzw. per Umgebungsvariable/`.env` (siehe auch `.e
 | Variable | Default | Bedeutung |
 |----------|---------|-----------|
 | `MODE` | `agent` | `agent` (Agentenmodus) \| `openrouter-chat` (reiner Chat) |
-| `AGENT_PRIMARY_PROVIDER` | `ollama` | Innerhalb Agentenmodus: `ollama` (lokal) \| `openrouter` (Cloud) |
-| `AGENT_OPENROUTER_MODEL` | `openai/gpt-5.6-luna` | Bevorzugtes Cloud-Modell im Agentenmodus (konsistent zu Glyph; „max“, = V4 Flash) |
-| `AGENT_OPENROUTER_FALLBACK_MODEL` | `inclusionai/ling-3.0-flash:free` | Kostenloses OpenRouter-Modell (Stufe 2) |
-| `AGENT_LOCAL_FALLBACK_PROVIDER` | `ollama` | Lokales Qwen (Stufe 3, nur Agentenmodus) |
+| `AGENT_PRIMARY_PROVIDER` | `openrouter` | B+: `openrouter` \| explizit `fallback` (3 Stufen) \| `ollama` (veraltet) |
+| `AGENT_OPENROUTER_MODEL` | `openai/gpt-5.6-luna` | Cloud-Denker |
+| `AGENT_OPENROUTER_FALLBACK_MODEL` | `inclusionai/ling-3.0-flash:free` | Nur bei `PROVIDER=fallback` |
+| `AGENT_LOCAL_FALLBACK_PROVIDER` | `ollama` | Nur bei `PROVIDER=fallback` (nicht B+) |
 | `OPENROUTER_MODEL` | `openai/gpt-5.6-luna` | Modell im `openrouter-chat`-Modus |
 | `OPENROUTER_FALLBACK_MODEL` | `inclusionai/ling-3.0-flash:free` | Kostenloses Modell im `openrouter-chat` |
 | `OPENROUTER_ALLOW_TOOLS` | `false` | Tools im Chat-Modus (nicht empfohlen) |
@@ -191,13 +171,22 @@ glyph-agent/
 └── logs/               # Aktions-Protokoll (gitignored)
 ```
 
-## Geplante Ausbaustufen (erst nach persönlichem Bewähren)
+## Tools (B+)
 
-1. **V1 (aktuell):** Vault lesen/suchen/zusammenfassen, Notizen erstellen,
-   bearbeiten mit Diff + Backup. Web optional.
-2. **V2:** Task-Extraktion (Fristen), Vorlagen ausfüllen, wiederverwendbare
-   Workflows.
-3. **V3 (Produkt, nur falls gewünscht):** Mac-mini-Portierung, konfigurierbarer
-   Vault-Pfad, mehrere Vaults/Benutzer, Installer — erst DANN.
+| Tool | Rolle |
+|------|--------|
+| **VaultFind** | Ein Finde-Werkzeug (Hybrid Embedding+Keyword). Aliase: VaultRecall, VaultSearch |
+| ReadNote / Summarize / CreateNote / ProposeEdit / ApplyEdit | Vault lesen/schreiben |
+| WebSearch (Exa) | grobe Websuche |
+| ExtractUrl / FetchUrl (TinyFish) | feine Zielseiten |
+| ObsidianOpen | optional kepano-CLI, pfadgebunden |
+
+Index-Hygiene (Bericht, kein Löschen): `python3 scripts/index_hygiene.py`
+
+## Geplante Ausbaustufen
+
+1. **V1 (aktuell):** B+ Pipeline, Hybrid-Find, Trace/Steps, Diff+Backup.
+2. **V2:** PDF-Inhalte, Task-Extraktion, Workflows.
+3. **V3 (nur falls gewünscht):** Produkt/Installer.
 
 > „Persönliche Funktionalität vor Produktarchitektur."
