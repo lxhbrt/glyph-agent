@@ -77,16 +77,14 @@ def _embed_attachments(message, attachments):
     return "\n\n".join(parts) if parts else (message or "")
 
 
-def _handle_chat(payload):
+def _handle_chat(payload, send=None):
     """Verarbeitet eine /chat-Anfrage.
 
-    Modus-Unterscheidung (klar getrennt):
-      - MODE=agent          : Tool-Loop mit Wiki-/Tool-Zugriff (Qwen lokal greift zu,
-                              OpenRouter formuliert; Fallback-Kette).
-      - MODE=openrouter-chat: reine Chat-Oberfläche OHNE Tools/Vault — nur OpenRouter.
-
-    Optionales Feld "attachments": [{name, mime, content}, ...] (Textanhänge aus dem
-    ACP-Adapter, Stufe 1). Rückwärtskompatibel — fehlt das Feld, bleibt alles wie bisher.
+    send: optionaler Callback send(dict) for Live-Streaming. Wenn gesetzt, wird
+          jede Stufe (z.B. VaultFind start/done, WebSearch, OpenRouter, Antwort-
+          texte) als JSON-Line an send() übergeben, sobald sie eintritt — UND die
+          finale Antwort am Ende. Fehlt send, wird alles blockierend berechnet
+          und nur das Ergebnis-Dict zurückgegeben (rückwärtskompatibel).
     """
     message = (payload or {}).get("message", "")
     attachments = (payload or {}).get("attachments")
@@ -94,21 +92,32 @@ def _handle_chat(payload):
     # damit das Modell den Inhalt als Kontext bekommt.
     message = _embed_attachments(message, attachments)
     if not message.strip():
-        return {"ok": False, "answer": "Leere Nachricht.", "rounds": 0, "tool_calls": []}
+        err = {"ok": False, "answer": "Leere Nachricht.", "rounds": 0, "tool_calls": []}
+        if send:
+            send({"type": "done", **err})
+        return err
 
     if getattr(config, "MODE", "agent") == "openrouter-chat":
         # Reiner OpenRouter-Chat: KEIN Tool-Loop, KEIN Vault, KEINE Tools.
         from core import llm as _llm
         system = (
-            "Du bist ein hilfreicher Assistent (glyph-agent, reiner Chat-Modus). "
+            "Du bist glyph-agent (reiner Chat-Modus). Cloud-Denker: "
+            "openai/gpt-5.6-luna über OpenRouter (Free-Fallback bei Ausfall). "
             "Du hast KEINEN Zugriff auf Dateien, einen Vault, Tools oder das Internet. "
-            "Antworte nur aus deinem eigenen Wissen."
+            "Antworte nur aus deinem eigenen Wissen. "
+            "Bei Modell-Fragen: nenne openai/gpt-5.6-luna, kein Wiki/Tool nötig."
         )
         try:
             answer = _llm.chat(system, message)
-            return {"ok": True, "answer": answer, "rounds": 1, "tool_calls": [], "chat_mode": "openrouter-chat"}
+            res = {"ok": True, "answer": answer, "rounds": 1, "tool_calls": [], "chat_mode": "openrouter-chat"}
+            if send:
+                send({"type": "done", **res})
+            return res
         except Exception as e:
-            return {"ok": False, "answer": f"OpenRouter-Chat fehlgeschlagen: {e}", "rounds": 1, "tool_calls": [], "chat_mode": "openrouter-chat"}
+            res = {"ok": False, "answer": f"OpenRouter-Chat fehlgeschlagen: {e}", "rounds": 1, "tool_calls": [], "chat_mode": "openrouter-chat"}
+            if send:
+                send({"type": "done", **res})
+            return res
 
     # Agentenmodus: kontrollierter Tool-Loop mit Bestätigung für Schreib-Tools.
     confirm_allow = (payload or {}).get("confirm")
@@ -120,10 +129,23 @@ def _handle_chat(payload):
                 return True
         return False
 
-    result = tool_loop.run(message, confirm=confirm)
-    # Modell-Info anhängen (wichtig bei fallback: OpenRouter oder lokal geworden?).
+    def on_event(event):
+        # Live-Stufe/Teil-Antwort nach außen reichen (Streaming), wenn send genutzt wird.
+        if send:
+            send(event)
+
+    result = tool_loop.run(message, confirm=confirm, on_event=on_event)
+    # Modell-Info anhängen (Primär Luna oder Free-Fallback).
     p = llm.get_provider()
-    result = {"used_provider": p.provider_name, "used_model": p.model_name, "pending_confirmation": False, **result}
+    used_model = getattr(p, "_active_model", None) or p.model_name
+    result = {
+        "used_provider": p.provider_name,
+        "used_model": used_model,
+        "pending_confirmation": False,
+        **result,
+    }
+    if send:
+        send({"type": "done", **result})
     return result
 
 
@@ -163,17 +185,40 @@ def main():
                     self._send(400, {"error": "Invalid JSON"})
                     return
                 try:
-                    result = _handle_chat(payload)
-                    # bei write-Tool ohne Freigabe -> 200 mit pending-Flag
-                    self._send(200, {"pending_confirmation": False, **result})
+                    # Streaming-Modus (NDJSON): Client sendet explizit den Header —
+                    # dann werden Stufen/Teil-Antworten live als JSON-Lines geflusht.
+                    stream = (self.headers.get("Accept", "") == "application/x-ndjson")
+                    if not stream:
+                        result = _handle_chat(payload)
+                        # bei write-Tool ohne Freigabe -> 200 mit pending-Flag
+                        self._send(200, {"pending_confirmation": False, **result})
+                        return
+                    # --- NDJSON-Stream ---
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+                    self.send_header("Cache-Control", "no-cache")
+                    self.end_headers()
+                    def send(obj):
+                        try:
+                            line = (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
+                            self.wfile.write(line)
+                            self.wfile.flush()
+                        except Exception:
+                            pass
+                    _handle_chat(payload, send=send)
                 except Exception as e:
-                    self._send(500, {"error": str(e)})
+                    if "stream" in locals() and stream:
+                        try:
+                            send({"type": "error", "error": str(e)})
+                        except Exception:
+                            pass
+                    else:
+                        self._send(500, {"error": str(e)})
             else:
                 self._send(404, {"error": "Not found"})
 
     config.ensure_dirs()
-    # Start-Validierung des Primär-Providers: Bei openrouter (Recherchepfad) NUR starten,
-    # wenn der Key vorhanden ist — sonst klare Fehlermeldung statt stillem Fallback auf Qwen.
+    # Start-Validierung: OpenRouter-Key Pflicht — ohne Key kein Start (kein lokaler Chat).
     try:
         provider = llm.get_provider()
     except Exception as e:
@@ -184,7 +229,7 @@ def main():
         if not key:
             print(
                 "❌ AGENT_PRIMARY_PROVIDER=openrouter erfordert OPENROUTER_API_KEY.\n"
-                "   Start abgebrochen — KEIN stiller Fallback auf Qwen für den Recherchepfad.",
+                "   Start abgebrochen — Chat nur über OpenRouter (Luna → free).",
                 file=sys.stderr,
             )
             sys.exit(1)
