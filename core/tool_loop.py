@@ -355,102 +355,90 @@ def run(user_message, system_extra=None, confirm=None, max_rounds=MAX_ROUNDS, on
     # intent == "current" -> WebSearch darf direkt (parallel zu VaultFind).
     # sonst -> VaultFind zuerst; Web nur wenn unzureichend (selected < 1).
     intent = routing.classify_intent(user_message)
+    low_q = (user_message or "").lower()
+    # EXPLIZITE Kombi-Fragen: auch bei Vault-Treffer Web nachziehen (brauch KEIN Vault-Ergebnis).
+    combo_web = any(x in low_q for x in ("vergleiche mit web", "vergleiche mit dem internet",
+                                          "laut internet", "im web", "online prüfen"))
+    # need_web ist OHNE Vault-Ergebnis entscheidbar -> dann VaultFind + Web parallel.
+    need_web_fast = (intent == "current") or combo_web
+
+    acc = {"tool_calls": tool_calls, "tool_results": tool_results, "steps": steps, "history": history}
+
     _emit({"type": "step", "action": "VaultFind", "status": "start",
            "detail": "suche im Obsidian-Vault (Arbeitssicherheit/HSEQ)"})
-    vault = _run_vault_find(user_message)
-    if vault is not None:
-        sel = int(vault.get("selected") or 0)
-        # Ergebnis live melden, sobald die Suche fertig ist.
-        _emit({"type": "step", "action": "VaultFind", "status": "done",
-               "detail": f"{sel} Treffer" if sel > 0 else "nichts gefunden"})
-        tool_calls.append({"tool": "VaultFind", "args": {"query": user_message}, "ok": True})
-        tool_results.append({
-            "tool": "VaultFind",
-            "args": {"query": user_message},
-            "result": {"ok": True, "result": vault},
-        })
-        steps.append({
-            "step": "VaultFind",
-            "status": "success" if sel > 0 else "empty",
-            "detail": f"{sel} Treffer (hybrid)",
-        })
-        history.append({
-            "role": "user",
-            "content": f"Vault-Kontext vorab geladen (VaultFind hybrid, Quelle: intern):\n{_json_dumps(vault)}\n"
-                        "Nutze diesen Kontext, wenn er die Frage beantwortet. Wähle nur dann "
-                        "ein weiteres Tool, wenn die Antwort unvollständig bleibt.",
-        })
-        log.log("routing_precheck", intent=intent, vault_status=vault.get("status"),
-                selected=vault.get("selected"))
 
-    need_web = (intent == "current") or (not routing.is_sufficient(vault))
-    # Explizite Kombi-Fragen: auch bei Vault-Treffer Web nachziehen
-    low_q = (user_message or "").lower()
-    if any(x in low_q for x in ("vergleiche mit web", "vergleiche mit dem internet",
-                                  "laut internet", "im web", "online prüfen")):
-        need_web = True
+    def _vault_outcome(v):
+        sel = int(v.get("selected") or 0) if v is not None else 0
+        step = []
+        if v is not None:
+            step = [{"step": "VaultFind", "status": "success" if sel > 0 else "empty",
+                     "detail": f"{sel} Treffer (hybrid)"}]
+        return {
+            "tool_calls": [{"tool": "VaultFind", "args": {"query": user_message}, "ok": True}] if v is not None else [],
+            "tool_results": [{"tool": "VaultFind", "args": {"query": user_message},
+                               "result": {"ok": True, "result": v}}] if v is not None else [],
+            "steps": step,
+            "history_append": (f"Vault-Kontext vorab geladen (VaultFind hybrid, Quelle: intern):\n{_json_dumps(v)}\n"
+                                "Nutze diesen Kontext, wenn er die Frage beantwortet. Wähle nur dann "
+                                "ein weiteres Tool, wenn die Antwort unvollständig bleibt.") if v is not None else None,
+            "log_key": "routing_precheck" if v is not None else None,
+            "log_data": {"intent": intent, "vault_status": (v or {}).get("status"),
+                          "selected": (v or {}).get("selected")} if v is not None else {},
+        }
 
-    if need_web:
-        # DETERMINISTISCH: WebSearch bei need_web (nie dem Modell-Ermessen überlassen).
-        # Policy: Exa = grob (Default); bei URL in der Frage → TinyFish Extract (fein).
-        urls = research.extract_urls(user_message)
-        depth = research.classify_web_depth(user_message)
-        if urls and depth == "fine":
-            url0 = urls[0]
-            _emit({"type": "step", "action": "ExtractUrl", "status": "start",
-                   "detail": f"rufe konkrete URL ab (TinyFish, fein): {url0[:60]}"})
+    if need_web_fast:
+        # --- PARALLEL: VaultFind + WebSearch gleichzeitig (0.1a). ---
+        # Web braucht keinen Vault-Befund -> beide Threads parallel, Latenz max() statt Summe.
+        # Datenschutz: Web-Query = öffentliche Suchbegriffe; Vault bleibt lokal.
+        holder = {}
+        import threading as _th
+
+        def _vault_job():
             try:
-                fine_res = web.extract_tinyfish(url0, f"Extrahiere relevante Fakten zur Frage: {user_message[:200]}")
-                ok_fine = not (isinstance(fine_res, dict) and fine_res.get("error"))
+                holder["vault"] = _vault_outcome(_run_vault_find(user_message))
             except Exception as e:
-                fine_res = {"error": str(e)}
-                ok_fine = False
-            _emit({"type": "step", "action": "ExtractUrl", "status": "done" if ok_fine else "error",
-                   "detail": "Seite extrahiert" if ok_fine else str(fine_res.get("error", "Fehler"))[:80]})
-            tool_calls.append({"tool": "ExtractUrl", "args": {"url": url0}, "ok": ok_fine})
-            tool_results.append({
-                "tool": "ExtractUrl",
-                "args": {"url": url0, "goal": "question"},
-                "result": {"ok": ok_fine, "result": fine_res},
-            })
-            steps.append({
-                "step": "ExtractUrl",
-                "status": "success" if ok_fine else "error",
-                "detail": f"fein/TinyFish {url0[:60]}",
-            })
-            history.append({
-                "role": "user",
-                "content": f"Web-Fein-Kontext (TinyFish ExtractUrl):\n{_json_dumps(fine_res)}\n",
-            })
-            log.log("routing_precheck_web_fine", url=url0, ok=ok_fine)
+                holder["vault"] = {"tool_calls": [], "tool_results": [], "steps": [],
+                                    "history_append": None, "log_key": None, "log_data": {},
+                                    "error": str(e)}
+
+        def _web_job():
+            try:
+                holder["web"] = _run_web_precheck(user_message, intent, _emit)
+            except Exception as e:
+                holder["web"] = {"tool_calls": [], "tool_results": [], "steps": [],
+                                  "history_append": None, "log_key": None, "log_data": {},
+                                  "error": str(e)}
+
+        t1 = _th.Thread(target=_vault_job, daemon=True)
+        t2 = _th.Thread(target=_web_job, daemon=True)
+        t1.start(); t2.start()
+        t1.join(); t2.join()
+
+        vout = holder.get("vault") or {}
+        # Vault-Ergebnis live melden, sobald beide fertig sind (max statt Summe).
+        if vout.get("tool_results"):
+            vsel = int((vout["tool_results"][0]["result"].get("result") or {}).get("selected") or 0)
+            _emit({"type": "step", "action": "VaultFind", "status": "done",
+                   "detail": f"{vsel} Treffer" if vsel > 0 else "nichts gefunden"})
         else:
-            query = _derive_web_query(user_message)
-            source = research.default_web_source(user_message)
-            _emit({"type": "step", "action": "WebSearch", "status": "start",
-                   "detail": f"suche im Internet ({source}, grob): {query[:80]}"})
-            web_res = _run_web_search(query, source=source)
-            n = len(web_res) if isinstance(web_res, list) else 0
-            _emit({"type": "step", "action": "WebSearch", "status": "done",
-                   "detail": f"{n} Treffer ({source})" if n else "keine Treffer"})
-            tool_calls.append({"tool": "WebSearch", "args": {"query": query, "source": source}, "ok": True})
-            tool_results.append({
-                "tool": "WebSearch",
-                "args": {"query": query, "source": source},
-                "result": {"ok": True, "result": web_res},
-            })
-            steps.append({
-                "step": "WebSearch",
-                "status": "success" if n else "empty",
-                "detail": f"grob/{source} · {n} Treffer",
-            })
-            history.append({
-                "role": "user",
-                "content": f"Web-Kontext vorab geladen (Quelle: extern, {source}):\n{_json_dumps(web_res)}\n"
-                            "Nutze diesen Kontext, wenn er die Frage beantwortet. Wähle nur dann "
-                            "ein weiteres Tool, wenn die Antwort unvollständig bleibt.",
-            })
-            log.log("routing_precheck_web", intent=intent, source=source,
-                    web_hits=n)
+            _emit({"type": "step", "action": "VaultFind", "status": "done", "detail": "nichts gefunden"})
+        _merge_precheck(acc, vout)
+        _merge_precheck(acc, holder.get("web") or {})
+    else:
+        # --- SEQUENZIELL: Vault zuerst; Web NUR falls Vault unzureichend (kein unnötiger Web-Call). ---
+        vault = _run_vault_find(user_message)
+        if vault is not None:
+            sel = int(vault.get("selected") or 0)
+            _emit({"type": "step", "action": "VaultFind", "status": "done",
+                   "detail": f"{sel} Treffer" if sel > 0 else "nichts gefunden"})
+        else:
+            _emit({"type": "step", "action": "VaultFind", "status": "done", "detail": "nichts gefunden"})
+        _merge_precheck(acc, _vault_outcome(vault))
+
+        need_web = not routing.is_sufficient(vault)
+        if need_web:
+            _merge_precheck(acc, _run_web_precheck(user_message, intent, _emit))
+
 
     while rounds < max_rounds:
         rounds += 1
@@ -556,6 +544,88 @@ def _run_vault_find(user_message):
         return retrieval.vault_find(user_message)
     except Exception:
         return None
+
+
+def _run_web_precheck(user_message, intent, dead_emit=None):
+    """Führt den Web-Precheck deterministisch aus (ExtractUrl fein ODER WebSearch grob).
+
+    Gibt ein Dict mit den neu erzeugten Einträgen zurück, das der Aufrufer NACH dem
+    Thread-Join in die gemeinsamen Listen (tool_calls/tool_results/steps/history)
+    übernimmt — so gibt es keine Data-Races im parallelen Lauf.
+
+    dead_emit: optionaler Event-Callback (läuft im eigenen Thread; bei parallelem
+    Lauf sind die Schritt-Events des Web-Threads erlaubt).
+    """
+    import json as _json
+
+    emit = dead_emit or (lambda e: None)
+    tool_calls, tool_results, steps = [], [], []
+    history_append = None
+    log_key, log_data = None, {}
+
+    # Policy: Exa = grob (Default); bei URL in der Frage → TinyFish Extract (fein).
+    urls = research.extract_urls(user_message)
+    depth = research.classify_web_depth(user_message)
+    if urls and depth == "fine":
+        url0 = urls[0]
+        emit({"type": "step", "action": "ExtractUrl", "status": "start",
+              "detail": f"rufe konkrete URL ab (TinyFish, fein): {url0[:60]}"})
+        try:
+            fine_res = web.extract_tinyfish(url0, f"Extrahiere relevante Fakten zur Frage: {user_message[:200]}")
+            ok_fine = not (isinstance(fine_res, dict) and fine_res.get("error"))
+        except Exception as e:
+            fine_res = {"error": str(e)}
+            ok_fine = False
+        emit({"type": "step", "action": "ExtractUrl", "status": "done" if ok_fine else "error",
+              "detail": "Seite extrahiert" if ok_fine else str(fine_res.get("error", "Fehler"))[:80]})
+        tool_calls.append({"tool": "ExtractUrl", "args": {"url": url0}, "ok": ok_fine})
+        tool_results.append({
+            "tool": "ExtractUrl",
+            "args": {"url": url0, "goal": "question"},
+            "result": {"ok": ok_fine, "result": fine_res},
+        })
+        steps.append({"step": "ExtractUrl", "status": "success" if ok_fine else "error",
+                      "detail": f"fein/TinyFish {url0[:60]}"})
+        history_append = f"Web-Fein-Kontext (TinyFish ExtractUrl):\n{_json.dumps(fine_res)}\n"
+        log_key, log_data = "routing_precheck_web_fine", {"url": url0, "ok": ok_fine}
+    else:
+        query = _derive_web_query(user_message)
+        source = research.default_web_source(user_message)
+        emit({"type": "step", "action": "WebSearch", "status": "start",
+              "detail": f"suche im Internet ({source}, grob): {query[:80]}"})
+        web_res = _run_web_search(query, source=source)
+        n = len(web_res) if isinstance(web_res, list) else 0
+        emit({"type": "step", "action": "WebSearch", "status": "done",
+              "detail": f"{n} Treffer ({source})" if n else "keine Treffer"})
+        tool_calls.append({"tool": "WebSearch", "args": {"query": query, "source": source}, "ok": True})
+        tool_results.append({
+            "tool": "WebSearch",
+            "args": {"query": query, "source": source},
+            "result": {"ok": True, "result": web_res},
+        })
+        steps.append({"step": "WebSearch", "status": "success" if n else "empty",
+                      "detail": f"grob/{source} · {n} Treffer"})
+        history_append = (f"Web-Kontext vorab geladen (Quelle: extern, {source}):\n{_json.dumps(web_res)}\n"
+                          "Nutze diesen Kontext, wenn er die Frage beantwortet. Wähle nur dann "
+                          "ein weiteres Tool, wenn die Antwort unvollständig bleibt.")
+        log_key, log_data = "routing_precheck_web", {"intent": intent, "source": source, "web_hits": n}
+
+    return {"tool_calls": tool_calls, "tool_results": tool_results, "steps": steps,
+            "history_append": history_append, "log_key": log_key, "log_data": log_data}
+
+
+def _merge_precheck(acc, outcome):
+    """Übernimmt ein Precheck-Ergebnis-Dict (aus _run_vault_find-Fluss oder
+    _run_web_precheck) in die gemeinsamen Agenten-Listen, nachdem der Thread/Der
+    sequenzielle Schritt fertig ist — kein Konflikt auf den Listen."""
+    acc["tool_calls"].extend(outcome.get("tool_calls") or [])
+    acc["tool_results"].extend(outcome.get("tool_results") or [])
+    acc["steps"].extend(outcome.get("steps") or [])
+    if outcome.get("history_append"):
+        acc["history"].append({"role": "user", "content": outcome["history_append"]})
+    if outcome.get("log_key"):
+        log.log(outcome["log_key"], **outcome.get("log_data") or {})
+    return acc
 
 
 def _derive_web_query(user_message):
