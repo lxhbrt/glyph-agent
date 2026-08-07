@@ -184,6 +184,10 @@ _RESEARCH_REQUIREMENT = (
     "passende URL ab (FetchUrl/ExtractUrl). Vergleiche mehrere unabhängige Quellen, "
     "solange die Rundenzahl es erlaubt. Erwähne niemals nur eine einzelne unzureichende "
     "Quelle als Beleg, wenn andere Suchergebnisse mehr hergeben."
+    "\n\nKONTEXT-REICHE: Wenn die Werkzeug-Ergebnisse (Vault UND/ODER Web) die Frage "
+    "bereits ausreichend beantworten (Kontext vorhanden), wähle KEIN weiteres Tool "
+    "(insbesondere kein FetchUrl/ExtractUrl), sondern antworte JETZT direkt aus dem "
+    "vorhandenen Kontext. Nur bei wirklich fehlender oder leerer Belegbasis nachziehen."
 )
 
 
