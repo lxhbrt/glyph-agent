@@ -483,6 +483,27 @@ def run(user_message, system_extra=None, confirm=None, max_rounds=MAX_ROUNDS, on
 
         tool_name, args = parsed
 
+        # --- FetchUrl/ExtractUrl-Cancel (Review-Punkt 5): Wenn der Precheck bereits
+        #     brauchbaren Web-Kontext geliefert hat (WebSearch-Treffer ODER erfolgreiches
+        #     ExtractUrl), ist ein weiterer FetchUrl/ExtractUrl im ersten Nachlauf
+        #     redundant und erzeugt unnötig Latenz (40s+ PDF-Abrufe). Deterministisch
+        #     unterbinden: nicht ausführen, sondern direkt aus dem Vor-Kontext beantworten.
+        if (tool_name in ("FetchUrl", "ExtractUrl")) and _has_usable_web_context(tool_results):
+            _emit({"type": "step", "action": tool_name, "status": "done",
+                   "detail": "Cancel: Web-Kontext ist bereits aus dem Precheck vorhanden"})
+            tool_calls.append({"tool": tool_name, "args": args, "ok": False})
+            tool_results.append({"tool": tool_name, "args": args,
+                                 "result": {"ok": False, "error": "cancel: Web-Kontext vorhanden"}})
+            steps.append({"step": tool_name, "status": "success",
+                          "detail": "Cancel (Web schon da)"})
+            history.append({"role": "user", "content": (
+                f"Befehl '{tool_name}' wurde NICHT ausgeführt: Der Web-Kontext aus dem "
+                "Precheck reicht bereits zur Beantwortung. Formuliere deine finale "
+                "Antwort jetzt ausschließlich aus den vorhandenen Tool-Ergebnissen."
+            )})
+            log.log("agent_tool", tool=tool_name, rounds=rounds, ok=False, canceled="web-context")
+            continue
+
         # Stufen-Event: Tool beginnt, dann Ausführung starten, Ergebnis melden.
         _emit({"type": "step", "action": tool_name, "status": "start", "detail": None})
 
@@ -626,6 +647,29 @@ def _merge_precheck(acc, outcome):
     if outcome.get("log_key"):
         log.log(outcome["log_key"], **outcome.get("log_data") or {})
     return acc
+
+
+def _has_usable_web_context(tool_results):
+    """True, wenn der Precheck bereits brauchbaren Web-Kontext geliefert hat.
+
+    Nutzt nur das Ergebnis des Prechecks (VaultFind ist irrelevant):
+      - WebSearch mit n>0 Treffern (nicht-leere Liste)
+      - ExtractUrl erfolgreich (ok und kein error)
+    Wird vom FetchUrl/ExtractUrl-Cancel im Loop genutzt: liefert der Precheck
+    schon genug Web-Basis, ist ein zusätzlicher FetchUrl/ExtractUrl im ersten
+    Nachlauf redundant.
+    """
+    for tr in tool_results:
+        name = tr.get("tool")
+        res = tr.get("result") or {}
+        if name == "WebSearch":
+            body = (res.get("result") or [])
+            if isinstance(body, list) and len(body) > 0:
+                return True
+        elif name == "ExtractUrl":
+            if res.get("ok") and not res.get("error"):
+                return True
+    return False
 
 
 def _derive_web_query(user_message):
