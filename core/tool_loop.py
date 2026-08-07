@@ -496,13 +496,21 @@ def run(user_message, system_extra=None, confirm=None, max_rounds=MAX_ROUNDS, on
                                  "result": {"ok": False, "error": "cancel: Web-Kontext vorhanden"}})
             steps.append({"step": tool_name, "status": "success",
                           "detail": "Cancel (Web schon da)"})
-            history.append({"role": "user", "content": (
-                f"Befehl '{tool_name}' wurde NICHT ausgeführt: Der Web-Kontext aus dem "
-                "Precheck reicht bereits zur Beantwortung. Formuliere deine finale "
-                "Antwort jetzt ausschließlich aus den vorhandenen Tool-Ergebnissen."
-            )})
             log.log("agent_tool", tool=tool_name, rounds=rounds, ok=False, canceled="web-context")
-            continue
+            # KEINE weitere Loop-Runde (kein neuer _call_llm): Der Web-Kontext aus dem
+            # Precheck reicht bereits. Direkt aus dem vorhandenen Kontext final antworten
+            # (Single-Call-Final -> Aufgabe 2 Cloud-Calls: Precheck-Kontext + Final).
+            _emit({"type": "step", "action": "OpenRouter", "status": "done",
+                   "detail": "formuliert finale Antwort (Single-Call, Cancel direkt)"})
+            final = _call_llm(
+                _final_messages(user_message, tool_results),
+                extra_system=answer_system,
+            )
+            _emit({"type": "answer", "status": "content", "text": final})
+            steps.append({"step": "answer", "status": "success", "detail": f"{len(final)} Zeichen"})
+            log.log("agent_final", rounds=rounds, chars=len(final), single_call=True, cancel_direct=True)
+            return {"answer": final, "rounds": rounds, "tool_calls": tool_calls, "ok": True,
+                    "trace": _build_trace(tool_calls, tool_results, steps=steps)}
 
         # Stufen-Event: Tool beginnt, dann Ausführung starten, Ergebnis melden.
         _emit({"type": "step", "action": tool_name, "status": "start", "detail": None})
