@@ -10,10 +10,11 @@ Nutzerfrage
   → VaultFind (Hybrid: 0.7 Embedding bge-m3 + 0.3 Keyword)   [lokal]
   → Web bei Bedarf: Exa = grob · TinyFish = fein              [API]
   → OpenRouter openai/gpt-5.6-luna formuliert                [Cloud]
+       → bei Ausfall: inclusionai/ling-3.0-flash:free
   → Antwort + Trace/Steps
 ```
 
-**Qwen ist kein Chat-Modell mehr.** Ollama läuft nur noch für **Embeddings** (`bge-m3`).
+Ollama läuft **nur** für **Embeddings** (`bge-m3`) — **kein** Chat.
 
 ## Zwei Betriebsarten
 
@@ -22,28 +23,24 @@ Nutzerfrage
 | `agent` | VaultFind + Tools + Cloud-Antwort | `agent` + `openrouter` |
 | `openrouter-chat` | Reiner Chat — kein Wiki/Vault/Tools | — |
 
-### Provider (ehrlich)
+### Provider
 
 | `AGENT_PRIMARY_PROVIDER` | Verhalten |
 |--------------------------|-----------|
-| **`openrouter`** (B+-Default) | Nur Cloud-Denker. **Kein** automatischer Qwen-Fallback. |
-| `fallback` | **Nur wenn explizit gesetzt:** OpenRouter → `:free` → optional lokal. |
-| `ollama` | Veraltet für Chat (nicht empfohlen). |
-
-> Frühere Doku behauptete „immer 3 Stufen bei openrouter“ — das war **falsch**.
-> Die 3-Stufen-Kette existiert nur bei `PROVIDER=fallback`.
+| **`openrouter`** (B+-Default) | Luna → free bei Ausfall. Kein lokaler Chat. |
+| `fallback` | Alias derselben 2-Stufen-Cloud-Kette. |
 
 ## Architektur-Prinzip
 
 ```
-Glyph (Browser) → glyph-agent HTTP (server.py:18899) → Tool-Loop → Qwen/OpenRouter
+Glyph (Browser) → glyph-agent HTTP (server.py:18899) → Tool-Loop → OpenRouter (Luna → free)
                                                               ↓
                                                   Vault (Obsidian) · Web (Exa/TinyFish)
 ```
 
 - **Keine große Agenten-Bibliothek**, keine MCP.
 - Werkzeuge = einfache Python-Funktionen (`core/vault_tools.py`) mit Whitelist + Bestätigung.
-- Nur Python-stdlib + lokales Ollama; Web-Recherche optional Exa/TinyFish.
+- Nur Python-stdlib + Ollama für Embeddings; Web-Recherche optional Exa/TinyFish.
 
 ## Sicherheitsmaßnahmen
 
@@ -59,8 +56,7 @@ Glyph (Browser) → glyph-agent HTTP (server.py:18899) → Tool-Loop → Qwen/Op
    persönlich, personenbezogen) werden von Suche/Lesen/Editieren ausgeschlossen (env-überschreibbar).
 8. **Cloud-Audit:** Jede Übertragung an OpenRouter wird in `logs/actions.jsonl` protokolliert
    (provider, model, Zeichen, Zeit). Kein Senden ohne `OPENROUTER_API_KEY`.
-9. **Datenschutz-Schranke:** `EXTERNAL_MAX_CHARS` (Default 4000) kürzt Kontext vor Cloud-Übergabe;
-   lokales Ollama bleibt ungekürzt.
+9. **Datenschutz-Schranke:** `EXTERNAL_MAX_CHARS` (Default 4000) kürzt Kontext vor Cloud-Übergabe.
 10. **Modus-Trennung:** `openrouter-chat` hat KEINE Tools/Vault/Dateien — isolierte Oberfläche.
 
 ## Nutzung
@@ -74,44 +70,31 @@ curl -X POST http://127.0.0.1:18899/chat -H 'Content-Type: application/json' \
      -d '{"message": "Was steht im Vault zu Brandschutz?"}'
 ```
 
-Antwort enthält `used_provider` / `used_model` (welches Modell geantwortet hat — wichtig
-bei `fallback`). Ohne `confirm`-Liste werden Schreib-Tools (ApplyEdit/CreateNote) abgelehnt.
+Antwort enthält `used_provider` / `used_model` (welches Modell geantwortet hat —
+Luna oder Free-Fallback). Ohne `confirm`-Liste werden Schreib-Tools abgelehnt.
 
 ### Kommandozeile (CLI)
 
 ```bash
-# Suchen (liest Treffer + Modell ordnet ein)
 python3 -m scripts.cli search "Altöl"
-
-# Notiz lesen
 python3 -m scripts.cli read "Themen/PSA.md"
-
-# Notiz zusammenfassen / analysieren (Qwen, nur lesend)
 python3 -m scripts.cli summarize "Themen/PSA.md"
 python3 -m scripts.cli summarize "Themen/PSA.md" "mit Fokus auf Fristen"
-
-# Neue Notiz erstellen (überschreibt nie etwas)
 python3 -m scripts.cli create "test/Neue Notiz.md" "Abfallregister vorhanden"
-
-# Änderung vorschlagen → Diff ansehen → bestätigen → Backup+Schreiben
 python3 -m scripts.cli propose "Themen/PSA.md" "Füge Abschnitt Prüfintervalle ein"
-
-# Revisions-Backups ansehen
 python3 -m scripts.cli backups
-
-# Web-Recherche (kontrolliert; Exa-API, keine privaten Inhalte senden)
 python3 -m scripts.cli web "TRGS 510 Aktuelle Anforderungen"
 ```
 
 ### Selbsttest
 
 ```bash
-python3 tests/test_providers.py   # Provider-Routen + Fallback-Fehlerweg (9 Checks)
+python3 tests/test_providers.py   # Provider-Routen + Free-Fallback-Pfad
 ```
 
 ## Konfiguration
 
-Alle Werte in `core/config.py` bzw. per Umgebungsvariable/`.env` (siehe auch `.env.example`).
+Alle Werte in `core/config.py` bzw. per Umgebungsvariable/`.env`.
 
 **Primär-Vault:** `VAULT_PATH` → z. B. `/Users/<du>/ObsidianVaults/HSEQ Sync`.
 
@@ -119,28 +102,22 @@ Alle Werte in `core/config.py` bzw. per Umgebungsvariable/`.env` (siehe auch `.e
 
 | Variable | Default | Bedeutung |
 |----------|---------|-----------|
-| `MODE` | `agent` | `agent` (Agentenmodus) \| `openrouter-chat` (reiner Chat) |
-| `AGENT_PRIMARY_PROVIDER` | `openrouter` | B+: `openrouter` \| explizit `fallback` (3 Stufen) \| `ollama` (veraltet) |
-| `AGENT_OPENROUTER_MODEL` | `openai/gpt-5.6-luna` | Cloud-Denker |
-| `AGENT_OPENROUTER_FALLBACK_MODEL` | `inclusionai/ling-3.0-flash:free` | Nur bei `PROVIDER=fallback` |
-| `AGENT_LOCAL_FALLBACK_PROVIDER` | `ollama` | Nur bei `PROVIDER=fallback` (nicht B+) |
+| `MODE` | `agent` | `agent` \| `openrouter-chat` |
+| `AGENT_PRIMARY_PROVIDER` | `openrouter` | `openrouter` \| `fallback` (Alias) |
+| `AGENT_OPENROUTER_MODEL` | `openai/gpt-5.6-luna` | Primär-Cloud-Denker |
+| `AGENT_OPENROUTER_FALLBACK_MODEL` | `inclusionai/ling-3.0-flash:free` | Free bei Ausfall |
 | `OPENROUTER_MODEL` | `openai/gpt-5.6-luna` | Modell im `openrouter-chat`-Modus |
-| `OPENROUTER_FALLBACK_MODEL` | `inclusionai/ling-3.0-flash:free` | Kostenloses Modell im `openrouter-chat` |
-| `OPENROUTER_ALLOW_TOOLS` | `false` | Tools im Chat-Modus (nicht empfohlen) |
-| `OPENROUTER_ALLOW_VAULT` | `false` | Vault im Chat-Modus (nicht empfohlen) |
-| `EXTERNAL_MAX_CHARS` | `4000` | Datenschutz-Schranke (Kürzung vor Cloud-Übergabe) |
-| `BLOCKED_DIRS` | s. o. | Geschützte Vault-Ordner (kommagetrennt) |
-| `EXA_API_KEY` / `TINYFISH_API_KEY` | — | Web-Recherche (nur `web`-Tool) |
-| `OPENROUTER_API_KEY` | — | Nur für OpenRouter-Modi (nicht im lokalen Standard) |
+| `OPENROUTER_FALLBACK_MODEL` | `inclusionai/ling-3.0-flash:free` | Free im Chat-Modus |
+| `EXTERNAL_MAX_CHARS` | `4000` | Kürzung vor Cloud-Übergabe |
+| `OPENROUTER_API_KEY` | — | Pflicht für Chat |
 
-**Beispiel — Agentenmodus mit OpenRouter-Primär + lokalem Fallback:**
+**Beispiel:**
 
 ```env
 MODE=agent
 AGENT_PRIMARY_PROVIDER=openrouter
 AGENT_OPENROUTER_MODEL=openai/gpt-5.6-luna
 AGENT_OPENROUTER_FALLBACK_MODEL=inclusionai/ling-3.0-flash:free
-AGENT_LOCAL_FALLBACK_PROVIDER=ollama
 OPENROUTER_API_KEY=sk-or-…
 ```
 
@@ -148,45 +125,35 @@ OPENROUTER_API_KEY=sk-or-…
 
 ```
 glyph-agent/
-├── server.py           # lokaler HTTP-Dienst (POST /chat, GET /health, Modus-Trennung)
+├── server.py           # lokaler HTTP-Dienst (POST /chat, GET /health)
 ├── core/
-│   ├── config.py       # zentrale Konfiguration (Vault-Pfad, MODE, Provider, Blocklist)
-│   ├── log.py          # Aktions-Protokoll (JSON-Lines)
-│   ├── llm.py          # Provider-Brücke (nur hier Modellaufrufe)
-│   ├── tool_loop.py    # kontrollierter Agenten-Loop (Runden-Limit, Halluzinations-Fix)
-│   ├── tool_registry.py# Whitelist-Tools + write-Flag/Bestätigung (VaultSearch, WebSearch, …)
-│   ├── vault_tools.py  # Tools: search/read/create/propose/apply + Pfad-/Ordner-Sicherheit
-│   ├── agent.py        # Orchestrator (System-Prompt, Workflows)
-│   ├── web.py          # Exa + TinyFish (Suche/Extraktion), kontrolliert
-│   └── providers/      # austauschbare Modell-Adapter
-│       ├── ollama.py   #   lokales Qwen
-│       ├── openrouter.py # Cloud-Modell (auditiert, Kürzung)
-│       ├── fallback.py #   Agentenmodus-Kette: bevorzugt → kostenlos → lokal
-│       └── factory.py  #   wählt Provider
-├── scripts/
-│   └── cli.py          # lokale Oberfläche (Kommandozeile)
+│   ├── config.py       # zentrale Konfiguration
+│   ├── llm.py          # Provider-Brücke
+│   ├── tool_loop.py    # Agenten-Loop
+│   ├── tool_registry.py
+│   ├── vault_tools.py
+│   ├── agent.py
+│   ├── web.py
+│   └── providers/
+│       ├── openrouter.py # Luna → free
+│       ├── fallback.py   # Alias derselben Kette
+│       └── factory.py
+├── scripts/cli.py
 ├── tests/
-│   └── test_providers.py # Selbsttest Provider/Fallback (9 Checks)
-├── vault/backups/      # Revisions-Backups (gitignored)
-└── logs/               # Aktions-Protokoll (gitignored)
+├── vault/backups/
+└── logs/
 ```
 
 ## Tools (B+)
 
 | Tool | Rolle |
 |------|--------|
-| **VaultFind** | Ein Finde-Werkzeug (Hybrid Embedding+Keyword). Aliase: VaultRecall, VaultSearch |
+| **VaultFind** | Hybrid Embedding+Keyword. Aliase: VaultRecall, VaultSearch |
 | ReadNote / Summarize / CreateNote / ProposeEdit / ApplyEdit | Vault lesen/schreiben |
 | WebSearch (Exa) | grobe Websuche |
 | ExtractUrl / FetchUrl (TinyFish) | feine Zielseiten |
 | ObsidianOpen | optional kepano-CLI, pfadgebunden |
 
-Index-Hygiene (Bericht, kein Löschen): `python3 scripts/index_hygiene.py`
-
-## Geplante Ausbaustufen
-
-1. **V1 (aktuell):** B+ Pipeline, Hybrid-Find, Trace/Steps, Diff+Backup.
-2. **V2:** PDF-Inhalte, Task-Extraktion, Workflows.
-3. **V3 (nur falls gewünscht):** Produkt/Installer.
+Index-Hygiene: `python3 scripts/index_hygiene.py`
 
 > „Persönliche Funktionalität vor Produktarchitektur."

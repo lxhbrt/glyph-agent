@@ -36,19 +36,16 @@ LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs"
 # Betriebsart:
 #   "agent"          : VaultFind + optional Web, Antwort durch Cloud-Denker (OpenRouter).
 #   "openrouter-chat": reine Chat-Oberfläche OHNE Wiki/Tools.
-# Siehe CONSTITUTION.md — Qwen ist KEIN Chat-Standard mehr (Ollama nur für Embeddings bge-m3).
+# Chat-Denker = ausschließlich OpenRouter (Luna → free). Ollama nur Embeddings (bge-m3).
 MODE = os.environ.get("MODE", "agent").lower()
 
 # --- Agentenmodus (MODE=agent) ---
-# B+-Default: openrouter (Cloud-Denker). "ollama" nur noch für Experimente (nicht empfohlen).
-# "fallback" = explizite 3-Stufen-Kette OpenRouter → :free → optional lokal (NICHT B+-Default).
+# B+-Default: openrouter = Luna → free bei Ausfall. "fallback" = Alias derselben Kette.
 AGENT_PRIMARY_PROVIDER = os.environ.get("AGENT_PRIMARY_PROVIDER", "openrouter")
 AGENT_OPENROUTER_MODEL = os.environ.get("AGENT_OPENROUTER_MODEL", "openai/gpt-5.6-luna")
 AGENT_OPENROUTER_FALLBACK_MODEL = os.environ.get(
     "AGENT_OPENROUTER_FALLBACK_MODEL", "inclusionai/ling-3.0-flash:free"
 )
-# Nur relevant wenn PROVIDER=fallback (explizit). B+ nutzt das nicht.
-AGENT_LOCAL_FALLBACK_PROVIDER = os.environ.get("AGENT_LOCAL_FALLBACK_PROVIDER", "ollama")
 
 # --- OpenRouter-Chat-Modus (MODE=openrouter-chat) ---
 OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "openai/gpt-5.6-luna")
@@ -59,28 +56,24 @@ OPENROUTER_ALLOW_TOOLS = os.environ.get("OPENROUTER_ALLOW_TOOLS", "false").lower
 OPENROUTER_ALLOW_VAULT = os.environ.get("OPENROUTER_ALLOW_VAULT", "false").lower() == "true"
 
 # Provider-Auswahl:
-#   "openrouter" : B+-Standard — Cloud-Denker, kein lokaler Chat-Fallback
-#   "fallback"   : nur wenn explizit gesetzt (OpenRouter → free → lokal)
-#   "ollama"     : veraltet für Chat (Embeddings laufen separat über bge-m3)
+#   "openrouter" : B+-Standard — Luna → free
+#   "fallback"   : Alias — dieselbe 2-Stufen-Cloud-Kette (kein lokal)
 if MODE == "openrouter-chat":
     PROVIDER = "openrouter"
 else:
     PROVIDER = AGENT_PRIMARY_PROVIDER
 
-# Ollama: für Chat nur noch optional; Embeddings nutzen OLLAMA_URL + bge-m3 (retrieval.py).
+# Ollama nur für Embeddings (bge-m3) in retrieval.py — kein Chat-Modell.
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3.5:4b")  # nur bei PROVIDER=ollama/fallback
 
-# OpenRouter (optionales Cloud-Modell). Key aus Umgebung/.env — nicht im Code.
+# OpenRouter. Key aus Umgebung/.env — nicht im Code.
 OPENROUTER_URL = os.environ.get("OPENROUTER_URL", "https://openrouter.ai/api/v1")
-# OPENROUTER_MODEL schon oben (je Modus): hier Default für Kompatibilität.
 
 # Datenschutz-Schranke für Cloud-Anfragen: max. Zeichen, die an ein externes
 # Modell gehen (Tool-Loop kürzt Kontext vor der Übergabe). 0 = unbegrenzt (nicht empfohlen).
 EXTERNAL_MAX_CHARS = int(os.environ.get("EXTERNAL_MAX_CHARS", "4000"))
 
 # Geschützte Ordner(namen) im Vault — werden von SUCHEN/LESEN/EDITIEREN ausgeschlossen.
-# Ordner, die „private/privats/secrets/health“ usw. heißen oder enthalten, bleiben lokal tabu für den Agenten.
 BLOCKED_DIRS = [
     d.lower().strip()
     for d in os.environ.get(
@@ -90,8 +83,6 @@ BLOCKED_DIRS = [
     if d.strip()
 ]
 
-# Nummerierung für Revisionen: Format "R{laufendeNummer}"
-# Wird pro Datei geführt (Datei-Metadaten in einem Sidecar-JSON im Backup-Ordner).
 
 def ensure_dirs():
     """Legt benötigte Verzeichnisse an, falls sie fehlen."""

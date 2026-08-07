@@ -122,8 +122,8 @@ def try_parse_tool_call(text):
     Versucht, aus der Modell-Antwort einen Tool-Call zu extrahieren.
     Liefert (tool_name, args) oder None, wenn es keine Tool-Anfrage ist.
     Robust für EINEN oder MEHRERE verschachtelte JSON-Blöcke (gpt-5.6-luna sendet
-    teils mehrere WebSearch-Blöcke; Qwen einen einzelnen). Gibt den ERSTEN gültigen
-    Tool-Call zurück. Nutzt raw_decode, um verschachtelte Objekte korrekt zu parsen.
+    teils mehrere WebSearch-Blöcke). Gibt den ERSTEN gültigen Tool-Call zurück.
+    Nutzt raw_decode, um verschachtelte Objekte korrekt zu parsen.
     """
     import json
     import re

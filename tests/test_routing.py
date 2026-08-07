@@ -8,7 +8,7 @@ Szenarien (Nutzer-Priorisierung):
   2. Vault leer/unsicher        -> Web nachgezogen (beide Quellen)
   3. aktuelle Frage             -> Web direkt (classify_intent current)
   4. beide Quellen              -> internal_sources + external_sources getrennt
-  5. kein stiller/falsch dargestellter Fallback (fallback_used nur bei local-Qwen)
+  5. fallback_used nur bei Free-Modell (openrouter:free)
 
 Getestet werden core.routing (pure Funktionen) sowie die Trace-Ableitung
 sources.vault / sources.web aus tool_loop._build_sources_trace.
@@ -166,7 +166,7 @@ def test_4_beide_quellen_getrennt():
 
 
 def test_5_fallback_sichtbar():
-    print("\n[5] fallback_used: nur bei bewusstem lokalem Qwen-Fallback sichtbar:")
+    print("\n[5] fallback_used: nur bei Free-Modell (openrouter:free):")
     from core import tool_loop, llm
 
     class Fake:
@@ -184,12 +184,12 @@ def test_5_fallback_sichtbar():
         finally:
             llm.get_provider = orig
 
-    t_local = with_provider(Fake("fallback", "local"))
-    check("local-Qwen-Fallback -> fallback_used true", t_local.get("fallback_used") is True, "true")
-    t_free = with_provider(Fake("fallback", "openrouter:free"))
-    check("openrouter:free -> fallback_used false", t_free.get("fallback_used") is False, "true")
-    t_plain = with_provider(Fake("ollama"))
-    check("ollama -> fallback_used false", t_plain.get("fallback_used") is False, "true")
+    t_free = with_provider(Fake("openrouter", "openrouter:free"))
+    check("openrouter:free -> fallback_used true", t_free.get("fallback_used") is True, "true")
+    t_primary = with_provider(Fake("openrouter", "openrouter"))
+    check("primär Luna -> fallback_used false", t_primary.get("fallback_used") is False, "true")
+    t_fb = with_provider(Fake("fallback", "openrouter:free"))
+    check("fallback+free -> fallback_used true", t_fb.get("fallback_used") is True, "true")
 
 
 def main():

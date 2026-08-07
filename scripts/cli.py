@@ -3,9 +3,8 @@
 """
 glyph-agent — einfache lokale Oberfläche (Kommandozeile).
 
-Persönlicher Assistent für den Obsidian-Vault. Läuft komplett lokal
-über Ollama (Qwen). Keine OpenClaw-, keine Netzwerk-Abhängigkeit außer der
-bewusst kontrollierten Web-Recherche (siehe Such-Unterbefehl).
+Persönlicher Assistent für den Obsidian-Vault. Chat über OpenRouter
+(Luna → free). Vault lokal; Web-Recherche bewusst kontrolliert (Exa/TinyFish).
 
 Verwendung:
   python3 -m scripts.cli search "Altöl"

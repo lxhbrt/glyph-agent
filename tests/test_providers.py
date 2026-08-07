@@ -1,27 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Provider-Selbsttest — prüft die Modell-Provider und den Fallback-Fehlerweg.
+Provider-Selbsttest — OpenRouter Luna → free, kein lokaler Chat.
 
 Aufruf:
     python3 tests/test_providers.py
-
-Erwartung (lokal, ohne echten Cloud-Key):
-  - ollama    -> lädt als Provider 'ollama' (Qwen lokal; ggf. nicht erreichbar,
-                 wenn Ollama nicht läuft — dann Warnung statt Fehler).
-  - openrouter-> lädt als Provider 'openrouter', ohne Key MUSS sauber fehlschlagen
-                 (Datenschutz: kein Cloud-Versuch ohne Key).
-  - fallback  -> versucht OpenRouter, fällt bei Fehler auf lokal zurück und
-                 kennzeichnet die Antwort (Resilienz).
-
-Dieser Test ruft KEINEN echten Cloud-Dienst auf (wenn kein Key vorhanden ist)
-und sendet KEINE lokalen Daten nach außen.
 """
 import os
 import sys
 import importlib
 
-# Sicherstellen, dass das Projekt-Root auf dem Pfad liegt
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core import config
@@ -42,8 +30,6 @@ def check(name, cond, detail=""):
 
 
 def load(name, env_overrides=None):
-    """Setzt Provider + Env, lädt frisch den Provider."""
-    # B+: config liest AGENT_PRIMARY_PROVIDER / MODE, nicht HSEQ_PROVIDER.
     merged = {
         "AGENT_PRIMARY_PROVIDER": name,
         "MODE": "agent",
@@ -53,93 +39,23 @@ def load(name, env_overrides=None):
     for k, v in merged.items():
         os.environ[k] = v
     factory.reset_provider()
-    # config neu laden, damit PROVIDER/env neu gelesen wird
-    import importlib
     importlib.reload(config)
-    # PROVIDER im Modul erzwingen (falls Env-Reload unvollständig)
     config.PROVIDER = name if config.MODE != "openrouter-chat" else "openrouter"
     importlib.reload(factory)
     return factory.get_provider()
 
 
-def main():
-    import importlib as _il  # lokal, um Verschattung durch load() zu vermeiden
-    print("=== Provider-Selbsttest ===\n")
-
-    test_trace_fallback_used()
-
-    print("[1] olama (lokal) — muss laden:")
-    p = load("ollama")
-    check("provider_name == 'ollama'", p.provider_name == "ollama", f"-> {p.provider_name}")
-    check("Modellname gesetzt", bool(p.model_name), f"-> {p.model_name}")
-
-    print("\n[2] openrouter — ohne Key MUSS sauber fehlschlagen (Datenschutz):")
-    os.environ.pop("OPENROUTER_API_KEY", None)
-    os.environ["MODE"] = "openrouter-chat"  # reiner Chat: PROVIDER wird openrouter
-    p = load("openrouter")
-    check("provider_name == 'openrouter'", p.provider_name == "openrouter", f"-> {p.provider_name}")
-    try:
-        p.chat("s", "u")
-        check("Ohne Key blockiert (kein Cloud-Versuch)", False, "<- hat NICHT geblockt!")
-    except RuntimeError as e:
-        check("Ohne Key blockiert (kein Cloud-Versuch)", True, f"-> RuntimeError: {str(e)[:40]}")
-
-    print("\n[3] fallback (Agentenmodus) — 2-stufige OpenRouter-Kette + lokales Qwen:")
-    p = load("fallback", {
-        "OPENROUTER_URL": "http://127.0.0.1:1",
-        "OPENROUTER_API_KEY": "test",
-        "MODE": "agent",
-        "AGENT_PRIMARY_PROVIDER": "fallback",
-        "PROVIDER": "fallback",
-        "AGENT_OPENROUTER_MODEL": "openai/gpt-5.6-luna",
-        "AGENT_OPENROUTER_FALLBACK_MODEL": "inclusionai/ling-3.0-flash:free",
-    })
-    check("provider_name == 'fallback'", p.provider_name == "fallback", f"-> {p.provider_name}")
-    check("Modell zeigt Kette (bevorzugt->gratis->lokal)", "→" in p.model_name, f"-> {p.model_name}")
-    try:
-        answer = p.chat("Du.", "Sag nur: FALLBACK_OK")
-        check("Lokale Antwort erzeugt (Stufe 3)", bool(answer.strip()), f"-> '{answer[:30]}...'")
-        check("Lokaler Hinweis vorhanden", "lokal" in answer.lower() or "nicht erreichbar" in answer.lower())
-        # fallback_used-Fix: nach dem bewussten lokalen Qwen-Fallback muss last_used == 'local'
-        check("last_used == 'local' (bewusster Qwen-Fallback)", p.last_used == "local", f"-> {p.last_used}")
-    except Exception as e:
-        check("Fallback lief durch", False, f"-> {type(e).__name__}: {str(e)[:60]}")
-
-    print("\n[3b] openrouter-chat Modus — reiner Chat, keine Tools/Vault:")
-    # Dieser Modus ist NICHT im Unit-Test prüfbar (Modul-Reload-Isolation mit server.py
-    # ist fragil). Er ist über den echten HTTP-Server verifiziert:
-    #   MODE=openrouter-chat python3 server.py  →  POST /chat liefert chat_mode=openrouter-chat,
-    #   tool_calls=[], und OHNE Qwen-Fallback (reiner OpenRouter-Pfad, Fehler bei Ausfall).
-    print(
-        "  (ℹ️  Server-E2E-Test: MODE=openrouter-chat → chat_mode, tool_calls=[], "
-        "kein Vault/Tools, kein Qwen-Fallback) — per Live-Server verifiziert"
-    )
-
-
-    print("\n[4] Kürzungsschranke (EXTERNAL_MAX_CHARS) im Tool-Loop:")
-    from core import tool_loop
-    cap = getattr(config, "EXTERNAL_MAX_CHARS", 4000)
-    big = [{"tool": "ReadNote", "args": {"path": "x.md"}, "result": {"content": "A" * (cap + 5000)}}]
-    # erzwinge Cloud-Ansicht für die Kürzung
-    os.environ["HSEQ_PROVIDER"] = "fallback"
-    _il.reload(config); _il.reload(tool_loop)
-    out = tool_loop._fmt_tool_results(big)
-    check(f"Kürzung auf ~{cap} bei fallback", len(out) <= cap + 150, f"-> {len(out)} Zeichen")
-
-    print(f"\n=== Ergebnis: {OK} ok, {FAIL} Fehler ===")
-    sys.exit(1 if FAIL else 0)
-
-
 def test_trace_fallback_used():
-    """fallback_used-Fix: _build_trace leitet den bewussten Qwen-Fallback aus dem
-    Provider-Zustand ab, statt hartcodiert False zu setzen. Isoliert (keine API-Calls)."""
+    """fallback_used: True nur bei openrouter:free."""
     from core import tool_loop, llm
 
     class Fake:
-        def __init__(self, pname, model, last_used=None):
+        def __init__(self, pname, model, last_used=None, active=None):
             self.provider_name = pname
             self.model_name = model
             self.last_used = last_used
+            if active is not None:
+                self._active_model = active
 
     orig = llm.get_provider
 
@@ -150,39 +66,99 @@ def test_trace_fallback_used():
         finally:
             llm.get_provider = orig
 
-    # Fallback-Bewusstes lokales Qwen
-    with_provider(Fake("fallback", "gpt → free (lokal: qwen)", "local"), lambda: (
-        check("lokaler Qwen-Fallback -> fallback_used true",
-              tool_loop._build_trace([], [], None).get("fallback_used") is True)
+    with_provider(Fake("openrouter", "luna → free", "openrouter:free", "free-model"), lambda: (
+        check(
+            "free-Fallback -> fallback_used true",
+            tool_loop._build_trace([], [], None).get("fallback_used") is True,
+        )
     ))
 
-    # FallbackProvider, aber Modellwechsel nur in OpenRouter (openrouter:free) -> kein lokaler Fallback
-    with_provider(Fake("fallback", "gpt → free", "openrouter:free"), lambda: (
-        check("openrouter:free (kein lokal) -> fallback_used false",
-              tool_loop._build_trace([], [], None).get("fallback_used") is False)
+    with_provider(Fake("fallback", "luna → free", "openrouter:free"), lambda: (
+        check(
+            "fallback+free -> fallback_used true",
+            tool_loop._build_trace([], [], None).get("fallback_used") is True,
+        )
     ))
 
-    # Reines OpenRouter
-    with_provider(Fake("openrouter", "gpt", "openrouter"), lambda: (
-        check("openrouter -> fallback_used false",
-              tool_loop._build_trace([], [], None).get("fallback_used") is False)
+    with_provider(Fake("openrouter", "luna", "openrouter", "openai/gpt-5.6-luna"), lambda: (
+        check(
+            "primär Luna -> fallback_used false",
+            tool_loop._build_trace([], [], None).get("fallback_used") is False,
+        )
     ))
 
-    # Reines Ollama ohne last_used
-    with_provider(Fake("ollama", "qwen-solid"), lambda: (
-        check("ollama -> fallback_used false",
-              tool_loop._build_trace([], [], None).get("fallback_used") is False)
-    ))
-
-    # Expliziter Wert wird respektiert
     with_provider(Fake("openrouter", "gpt"), lambda: (
-        check("explizit True hat Vorrang",
-              tool_loop._build_trace([], [], True).get("fallback_used") is True)
+        check(
+            "explizit True hat Vorrang",
+            tool_loop._build_trace([], [], True).get("fallback_used") is True,
+        )
     ))
 
-    # Diskrepanz-Schutz: Diese Funktion prüft nur _build_trace-isoliert; die
-    # Zähler werden global geführt, kein Delta nötig.
     print("[trace-fallback] abgeschlossen.")
+
+
+def main():
+    print("=== Provider-Selbsttest ===\n")
+
+    test_trace_fallback_used()
+
+    print("\n[1] openrouter — ohne Key MUSS sauber fehlschlagen:")
+    os.environ.pop("OPENROUTER_API_KEY", None)
+    os.environ["MODE"] = "openrouter-chat"
+    p = load("openrouter")
+    check("provider_name == 'openrouter'", p.provider_name == "openrouter", f"-> {p.provider_name}")
+    check("Primär-Modell Luna", "gpt-5.6-luna" in (p.model or ""), f"-> {getattr(p, 'model', p.model_name)}")
+    try:
+        p.chat("s", "u")
+        check("Ohne Key blockiert", False, "<- hat NICHT geblockt!")
+    except RuntimeError as e:
+        check("Ohne Key blockiert", True, f"-> RuntimeError: {str(e)[:40]}")
+
+    print("\n[2] fallback — 2-stufige Cloud-Kette (kein lokal):")
+    p = load("fallback", {
+        "OPENROUTER_URL": "http://127.0.0.1:1",
+        "OPENROUTER_API_KEY": "test",
+        "MODE": "agent",
+        "AGENT_PRIMARY_PROVIDER": "fallback",
+        "AGENT_OPENROUTER_MODEL": "openai/gpt-5.6-luna",
+        "AGENT_OPENROUTER_FALLBACK_MODEL": "inclusionai/ling-3.0-flash:free",
+    })
+    check("provider_name == 'fallback'", p.provider_name == "fallback", f"-> {p.provider_name}")
+    check("Modell zeigt Kette (→)", "→" in p.model_name, f"-> {p.model_name}")
+    check("kein 'lokal' im Modellnamen", "lokal" not in p.model_name.lower(), f"-> {p.model_name}")
+    try:
+        p.chat("Du.", "Sag nur: OK")
+        check("Beide Cloud-Stufen down -> harter Fehler", False, "<- hat nicht geworfen")
+    except Exception as e:
+        check(
+            "Beide Cloud-Stufen down -> harter Fehler",
+            True,
+            f"-> {type(e).__name__}: {str(e)[:50]}",
+        )
+        check("last_used nie 'local'", getattr(p, "last_used", None) != "local")
+
+    print("\n[3] veralteter Name 'ollama' wird auf openrouter umgebogen:")
+    os.environ["OPENROUTER_API_KEY"] = "test"
+    p = load("ollama", {"MODE": "agent", "AGENT_PRIMARY_PROVIDER": "ollama"})
+    # factory maps ollama → openrouter
+    check(
+        "ollama-Alias lädt openrouter",
+        p.provider_name == "openrouter",
+        f"-> {p.provider_name}",
+    )
+
+    print("\n[4] Kürzungsschranke (EXTERNAL_MAX_CHARS) im Tool-Loop:")
+    from core import tool_loop
+    cap = getattr(config, "EXTERNAL_MAX_CHARS", 4000)
+    big = [{"tool": "ReadNote", "args": {"path": "x.md"}, "result": {"content": "A" * (cap + 5000)}}]
+    os.environ["AGENT_PRIMARY_PROVIDER"] = "openrouter"
+    importlib.reload(config)
+    importlib.reload(tool_loop)
+    out = tool_loop._fmt_tool_results(big)
+    check(f"Kürzung auf ~{cap} bei openrouter", len(out) <= cap + 150, f"-> {len(out)} Zeichen")
+
+    print(f"\n=== Ergebnis: {OK} ok, {FAIL} Fehler ===")
+    sys.exit(1 if FAIL else 0)
 
 
 if __name__ == "__main__":

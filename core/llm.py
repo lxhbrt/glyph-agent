@@ -7,7 +7,7 @@ nie direkt einen Provider. Dadurch bleibt das Modell austauschbar, ohne dass
 an der Agenten-/Tool-Schicht etwas geändert wird:
 
     core/llm.chat() / core/llm.generate()
-        -> providers.get_provider()  (Ollama heute, MLX später, ...)
+        -> providers.get_provider()  (OpenRouter Luna → free)
             -> konkretes Modell
 
 Die tatsächliche Provider-Implementierung liegt in core/providers/*.

@@ -22,7 +22,7 @@ _Avoid_: OpenRouter-Profil (entfernt)
 
 **B+**:
 Aktuelle Architektur: lokal Gedächtnis/Suche, Web nur bei Bedarf, Cloud-Denker formuliert, Antwort + Trace.
-_Avoid_: „3-Stufen-Fallback“ als Default (gilt nur bei explizitem `fallback`)
+_Avoid_: „3-Stufen-Fallback“ / lokaler Chat-Fallback (existiert nicht mehr; nur Luna → free)
 
 ## Settled decisions (grill 2026-08-05)
 

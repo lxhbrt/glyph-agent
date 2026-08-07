@@ -8,18 +8,19 @@ Kurze Spielregeln. Bei Widerspruch gilt **diese Datei** vor älteren README-Sät
 Nutzerfrage
   → lokales Gedächtnis (VaultFind: Embedding + Keyword)
   → Web nur bei Bedarf (Exa = grob, TinyFish = fein)
-  → Cloud-Denker (OpenRouter / openai/gpt-5.6-luna) formuliert
+  → Cloud-Denker OpenRouter: openai/gpt-5.6-luna
+       → bei Ausfall: inclusionai/ling-3.0-flash:free
   → Antwort + Trace (was lief, welches Modell)
 ```
 
 | Rolle | Wer | Nicht |
 |-------|-----|--------|
 | **Gedächtnis / Suche** | lokal: bge-m3 + Keyword, Vault-Tools | Cloud-Embeddings |
-| **Denken / Antwort** | OpenRouter `openai/gpt-5.6-luna` | lokales Qwen als Chat |
-| **UI / Build** | Glyph-UI: Grok = Build, Claude = Code, glyph-agent = Vault/Tools + Cloud-Antwort | Profile verwechseln; OpenRouter ist kein UI-Profil |
-| **Qwen** | **entfernt** aus dem Agent-Chat-Pfad | kein Firewall, kein Standard |
+| **Denken / Antwort** | OpenRouter `openai/gpt-5.6-luna` → free | lokaler Chat |
+| **UI / Build** | Glyph-UI: Grok = Build, Claude = Code, glyph-agent = Vault/Tools + Cloud-Antwort | Profile verwechseln |
 
-Ollama bleibt **nur** für lokale Embeddings (`bge-m3`), nicht als Antwort-KI.
+Ollama bleibt **nur** für lokale Embeddings (`bge-m3`), nicht als Antwort-KI.  
+**Kein** lokaler Chat-Fallback. Wenn Luna und Free scheitern: harter Fehler.
 
 ## Datenschutz (ohne LLM-Theater)
 
@@ -48,15 +49,26 @@ Alte Namen `VaultRecall` / `VaultSearch` bleiben als Aliase, rufen dasselbe auf.
 - Verbesserungen **vorschlagen** ist erwünscht; umsetzen erst nach Auftrag.
 - Vorgaben 1:1; bei Unsicherheit nachfragen.
 
+## Identität (Self-ID) — freistil
+
+Bei Fragen wie „Welches Modell bist du?“ und Follow-ups („woher weißt du das?“):
+
+| Quelle | Rolle |
+|--------|--------|
+| **Profil** `glyph-agent` + **aktuelles `used_model`** (Runtime) | **Fakten** für die Antwort |
+| Cloud-Denker (OpenRouter Luna → free) | **Formuliert freistil** — Ton, Länge, Stil dem Gespräch anpassen |
+| Tool-Ergebnisse, Wiki, Session-Archive | **Nein** — kein VaultFind, keine Quellenliste |
+
+**Nicht:** starres Template ablesen, „steht nicht im Tool-Ergebnis“, HSEQ-Müll-Quellen.  
+**Ja:** Model freestilt mit Runtime-Fakten (Profil + Modell + Provider). Kein lokaler Chat.
+
 ## Provider (ehrlich)
 
 | Einstellung | Bedeutung |
 |-------------|-----------|
-| `AGENT_PRIMARY_PROVIDER=openrouter` (B+-Standard) | Nur Cloud-Denker. **Kein** automatischer Qwen-Fallback. |
-| `PROVIDER=fallback` | Nur wenn **explizit** gesetzt: OpenRouter → :free → optional lokal. **Nicht** der B+-Default. |
+| `AGENT_PRIMARY_PROVIDER=openrouter` (B+-Standard) | Luna → free bei Ausfall. **Kein** lokaler Chat. |
+| `PROVIDER=fallback` | Alias derselben 2-Stufen-Cloud-Kette. |
 | `MODE=openrouter-chat` | Reiner Chat, **kein** Vault/Tools. |
-
-Die alte Doku „immer 3 Stufen“ galt nur für `fallback` — nicht für `openrouter`.
 
 ## Obsidian-CLI (optional)
 
