@@ -474,16 +474,18 @@ def run(user_message, system_extra=None, confirm=None, max_rounds=MAX_ROUNDS, on
                 steps.append({"step": "LLM", "status": "success", "detail": "answer"})
             if tool_calls:
                 _emit({"type": "step", "action": "OpenRouter", "status": "done",
-                       "detail": "formuliert finale Antwort"})
-                final = llm.chat(
-                    answer_system,
-                    f"Ursprüngliche Frage des Nutzers: {user_message}\n\n"
-                    + _fmt_tool_results(tool_results)
-                    + "\n\nFormuliere deine finale Antwort ausschließlich aus diesen Tool-Ergebnissen.",
+                       "detail": "formuliert finale Antwort (Single-Call mit Belegpflicht)"})
+                # SINGLE-CALL (0.3): Statt eines zweiten LLM-Calls (answer_system) die
+                # Striktheitsregeln in denselben Call integrieren. Der Kontext (history
+                # mit Vault+Web-Tool-Ergebnissen) wird anhängt; der System-Prompt trägt
+                # zusätzlich die answer_system-Belegpflicht. Ein OpenRouter-Round-Trip.
+                final = _call_llm(
+                    _final_messages(user_message, tool_results),
+                    extra_system=answer_system,
                 )
                 _emit({"type": "answer", "status": "content", "text": final})
                 steps.append({"step": "answer", "status": "success", "detail": f"{len(final)} Zeichen"})
-                log.log("agent_final", rounds=rounds, chars=len(final))
+                log.log("agent_final", rounds=rounds, chars=len(final), single_call=True)
                 return {"answer": final, "rounds": rounds, "tool_calls": tool_calls, "ok": True,
                         "trace": _build_trace(tool_calls, tool_results, steps=steps)}
             log.log("agent_reply", rounds=rounds, direct=True)
@@ -524,10 +526,17 @@ def run(user_message, system_extra=None, confirm=None, max_rounds=MAX_ROUNDS, on
 
         # Bei Tool-Fehler abbrechen (keine Schleife auf Fehler)
         if not result.get("ok"):
-            final = llm.chat(
-                answer_system,
-                f"Ursprüngliche Frage: {user_message}\n\n" + _fmt_tool_results(tool_results)
-                + "\n\nEin Tool meldete einen Fehler. Erkläre knapp, was passiert ist und was fehlt.",
+            # Single-Call: Striktheitsregeln in denselben Call integrieren (kein 2. Round-Trip).
+            final = _call_llm(
+                [
+                    {"role": "user", "content": f"Ursprüngliche Frage: {user_message}"},
+                    {"role": "user", "content": (
+                        "Tool-Ergebnisse (deine ausschließliche Belegbasis):\n\n"
+                        + _fmt_tool_results(tool_results)
+                        + "\n\nEin Tool meldete einen Fehler. Erkläre knapp, was passiert ist und was fehlt."
+                    )},
+                ],
+                extra_system=answer_system,
             )
             steps.append({"step": "answer", "status": "error", "detail": "nach Tool-Fehler"})
             return {"answer": final, "rounds": rounds, "tool_calls": tool_calls, "ok": False,
@@ -637,8 +646,33 @@ def _fmt_tool_results(tool_results):
     return body
 
 
-def _call_llm(messages):
-    """Führt den Chat aus — baut aus der Message-Liste einen reinen Prompt."""
+def _final_messages(user_message, tool_results):
+    """Baut die user-Messages für den Single-Call-Final (0.3).
+
+    Statt eines separaten zweiten LLM-Calls (answer_system als eigener Chat) wird
+    die finale Antwort über EINEN Call formuliert, dessen System-Prompt die
+    Striktheitsregeln (answer_system) trägt. Die Tool-Ergebnisse (= Belegbasis)
+    kommen aus tool_results (formatierte Quellen), die ursprüngliche Frage bleibt
+    als Kontext erhalten. Rückgabe: Liste von {"role":"/content"}-Messages.
+    """
+    return [
+        {"role": "user", "content": f"Ursprüngliche Frage des Nutzers: {user_message}"},
+        {"role": "user", "content": (
+            "Tool-Ergebnisse (deine ausschließliche Belegbasis):\n\n"
+            + _fmt_tool_results(tool_results)
+            + "\n\nFormuliere deine finale Antwort ausschließlich aus diesen Tool-Ergebnissen."
+        )},
+    ]
+
+
+def _call_llm(messages, extra_system=None):
+    """Führt den Chat aus — baut aus der Message-Liste einen reinen Prompt.
+
+    extra_system: optionaler zusätzlicher System-Anweisungsblock (z.B. die
+    answer_system-Striktheitsregeln), der an den Basis-System-Prompt angehängt
+    wird. Damit kann EIN Call sowohl Kontext tragen ALS AUCH strikt belegt
+    formulieren — kein zweiter Cloud-Round-Trip nötig.
+    """
     parts = []
     for m in messages:
         role = m["role"]
@@ -649,6 +683,8 @@ def _call_llm(messages):
     # System + Loop-Inhalt gebündelt für stabilen Chat-Call an OpenRouter
     system = (_ROLE + "\n\n" + tool_registry.tool_schema_prompt()
               + _RESEARCH_REQUIREMENT + "\n" + research.policy_prompt_snippet())
+    if extra_system:
+        system = system + "\n\n" + extra_system
     # System nur einmal; der eigentliche Loop-Inhalt kommt als user-Text
     user_body = "\n\n".join(
         f"### {('Nutzer' if m['role']=='user' else m['role'].capitalize())}\n{m['content']}"
