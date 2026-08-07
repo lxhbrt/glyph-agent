@@ -16,12 +16,41 @@ Nutzerfrage
 
 Ollama läuft **nur** für **Embeddings** (`bge-m3`) — **kein** Chat.
 
-## Zwei Betriebsarten
+## Betriebsarten
 
 | MODE | Bedeutung | Standard |
 |------|-----------|----------|
-| `agent` | VaultFind + Tools + Cloud-Antwort | `agent` + `openrouter` |
+| `agent` | VaultFind + Tools + Cloud-Antwort (Luna → free) | Default |
+| `code` | `^_Code` — Workspace-Tools + DeepSeek (kein VaultFind) | per Request `mode: "code"` oder Env |
 | `openrouter-chat` | Reiner Chat — kein Wiki/Vault/Tools | — |
+
+### MODE=`code` (^_Code / C′)
+
+Separater Pfad, **nicht** der Vault-Default:
+
+```text
+Nutzerfrage (mode=code)
+  → ListDir / ReadFile / WriteFile / RunCommand   [nur CODE_WORKSPACE_ROOTS]
+  → DeepSeek V4 Flash (OpenRouter) formuliert
+  → Write/Shell → pending_confirmation + resume_token (Glyph-Genehmigung)
+```
+
+| Variable | Default | Bedeutung |
+|----------|---------|-----------|
+| `CODE_OPENROUTER_MODEL` | `deepseek/deepseek-v4-flash-0731` | Denker |
+| `CODE_WORKSPACE_ROOTS` | `~/glyph-ui,~/glyph-agent` | erlaubte Roots |
+| `CODE_SHELL_TIMEOUT` | `60` | Shell-Timeout (s) |
+| `CHAT_TIMEOUT` | `60` | Hartes Total-Timeout pro OpenRouter-Chat-Call (s) |
+| `CODE_CHAT_TIMEOUT` | `= CHAT_TIMEOUT` | dasselbe im CODE-Modus (DeepSeek) |
+| `CODE_SHELL_ALLOW` | (Builtin-Whitelist) | Regex-Liste, Trenner `\|\|` |
+| `CODE_MAX_ROUNDS` | `8` | Tool-Loop-Runden |
+
+**Stabilität:** `server.py` nutzt `ThreadingHTTPServer` (hängender `/chat` blockiert nicht `/health`).
+Jeder Cloud-Call hat Wall-Clock-Timeout (Worker + `future.result`); ACP-Client bricht per
+`GLYPH_AGENT_TIMEOUT` ab (Default CODE 8 min / agent 5 min).
+
+Tools: **ListDir**, **ReadFile**, **WriteFile** (Diff+Backup), **RunCommand** (Whitelist + Deny).  
+Write/Shell brauchen Confirm; ohne `confirm`/`resume_token`+`allow` → `pending_confirmation`.
 
 ### Provider
 
@@ -127,9 +156,11 @@ OPENROUTER_API_KEY=sk-or-…
 glyph-agent/
 ├── server.py           # lokaler HTTP-Dienst (POST /chat, GET /health)
 ├── core/
-│   ├── config.py       # zentrale Konfiguration
+│   ├── config.py       # zentrale Konfiguration (+ CODE_*)
 │   ├── llm.py          # Provider-Brücke
-│   ├── tool_loop.py    # Agenten-Loop
+│   ├── tool_loop.py    # Agenten-Loop (Vault)
+│   ├── code_loop.py    # CODE-Loop (^_Code)
+│   ├── code_tools.py   # ListDir/Read/Write/Run (Workspace)
 │   ├── tool_registry.py
 │   ├── vault_tools.py
 │   ├── agent.py
@@ -144,7 +175,9 @@ glyph-agent/
 └── logs/
 ```
 
-## Tools (B+)
+## Tools
+
+### agent (Vault / B+)
 
 | Tool | Rolle |
 |------|--------|
@@ -153,6 +186,14 @@ glyph-agent/
 | WebSearch (Exa) | grobe Websuche |
 | ExtractUrl / FetchUrl (TinyFish) | feine Zielseiten |
 | ObsidianOpen | optional kepano-CLI, pfadgebunden |
+
+### code (^_Code)
+
+| Tool | Rolle |
+|------|--------|
+| ListDir / ReadFile | Workspace lesen (nur `CODE_WORKSPACE_ROOTS`) |
+| WriteFile | Schreiben mit Diff+Backup; braucht Glyph-Confirm |
+| RunCommand | Shell Whitelist+Timeout; braucht Glyph-Confirm |
 
 Index-Hygiene: `python3 scripts/index_hygiene.py`
 

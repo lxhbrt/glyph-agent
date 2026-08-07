@@ -32,11 +32,12 @@ BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "vau
 # Protokoll-/Log-Datei (JSON-Lines) für alle Aktionen.
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs", "actions.jsonl")
 
-# --- Modell-Runtime (B+, Stand 2026-08-05) ---
+# --- Modell-Runtime (B+, Stand 2026-08-05; CODE-Modus C′ 2026-08-07) ---
 # Betriebsart:
 #   "agent"          : VaultFind + optional Web, Antwort durch Cloud-Denker (OpenRouter).
 #   "openrouter-chat": reine Chat-Oberfläche OHNE Wiki/Tools.
-# Chat-Denker = ausschließlich OpenRouter (Luna → free). Ollama nur Embeddings (bge-m3).
+#   "code"           : ^_Code — Datei/Shell-Tools, KEIN VaultFind (DeepSeek via OpenRouter).
+# Chat-Denker = ausschließlich OpenRouter. Ollama nur Embeddings (bge-m3).
 MODE = os.environ.get("MODE", "agent").lower()
 
 # --- Agentenmodus (MODE=agent) ---
@@ -73,6 +74,65 @@ OPENROUTER_URL = os.environ.get("OPENROUTER_URL", "https://openrouter.ai/api/v1"
 # Modell gehen (Tool-Loop kürzt Kontext vor der Übergabe). 0 = unbegrenzt (nicht empfohlen).
 EXTERNAL_MAX_CHARS = int(os.environ.get("EXTERNAL_MAX_CHARS", "4000"))
 
+# --- CODE-Modus (^_Code / C′) ---
+# Denker: DeepSeek V4 Flash 0731 über OpenRouter (kein Anthropic/Claude-Code).
+CODE_OPENROUTER_MODEL = os.environ.get(
+    "CODE_OPENROUTER_MODEL", "deepseek/deepseek-v4-flash-0731"
+)
+CODE_OPENROUTER_FALLBACK_MODEL = os.environ.get(
+    "CODE_OPENROUTER_FALLBACK_MODEL", "deepseek/deepseek-v4-flash"
+)
+# Erlaubte Dateisystem-Roots (Komma-getrennt). Default: glyph-ui + glyph-agent.
+_HOME = os.path.expanduser("~")
+CODE_WORKSPACE_ROOTS = [
+    os.path.realpath(p.strip())
+    for p in os.environ.get(
+        "CODE_WORKSPACE_ROOTS",
+        f"{_HOME}/glyph-ui,{_HOME}/glyph-agent",
+    ).split(",")
+    if p.strip()
+]
+CODE_BACKUP_DIR = os.environ.get(
+    "CODE_BACKUP_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "vault", "code_backups"),
+)
+CODE_SHELL_TIMEOUT = int(os.environ.get("CODE_SHELL_TIMEOUT", "60"))
+# Hartes Total-Timeout für OpenRouter-Chat-Calls (Wall-Clock, nicht nur Socket).
+# Verhindert endloses Blockieren von resp.read() und damit Server-Einfrieren.
+CHAT_TIMEOUT = int(os.environ.get("CHAT_TIMEOUT", "60"))
+# CODE-Modus: eigener Override (Default = CHAT_TIMEOUT).
+CODE_CHAT_TIMEOUT = int(os.environ.get("CODE_CHAT_TIMEOUT", str(CHAT_TIMEOUT)))
+# Shell-Whitelist (Regex, match auf den gesamten Befehl). Nie rm/sudo usw. (Deny in code_tools).
+# Env-Override: CODE_SHELL_ALLOW mit Einträgen getrennt durch "||" (Komma bricht |Alternativen).
+_CODE_SHELL_DEFAULT = [
+    r"^ls(\s|$)",
+    r"^pwd$",
+    r"^echo(\s|$)",
+    r"^cat(\s|$)",
+    r"^head(\s|$)",
+    r"^tail(\s|$)",
+    r"^wc(\s|$)",
+    r"^rg(\s|$)",
+    r"^grep(\s|$)",
+    r"^find(\s|$)",
+    r"^git (status|diff|log|show|branch|rev-parse|remote|stash list)(\s|$)",
+    r"^npm (test|run|install|ci|ls|view|pack|outdated)(\s|$)",
+    r"^npx(\s|$)",
+    r"^pytest(\s|$)",
+    r"^python3? -m pytest(\s|$)",
+    r"^python3? -m unittest(\s|$)",
+    r"^python3? --version$",
+    r"^node --version$",
+    r"^npm --version$",
+]
+_code_shell_env = os.environ.get("CODE_SHELL_ALLOW", "").strip()
+CODE_SHELL_ALLOW = (
+    [p.strip() for p in _code_shell_env.split("||") if p.strip()]
+    if _code_shell_env
+    else list(_CODE_SHELL_DEFAULT)
+)
+CODE_MAX_ROUNDS = int(os.environ.get("CODE_MAX_ROUNDS", "8"))
+
 # Geschützte Ordner(namen) im Vault — werden von SUCHEN/LESEN/EDITIEREN ausgeschlossen.
 BLOCKED_DIRS = [
     d.lower().strip()
@@ -86,6 +146,6 @@ BLOCKED_DIRS = [
 
 def ensure_dirs():
     """Legt benötigte Verzeichnisse an, falls sie fehlen."""
-    for d in (BACKUP_DIR, os.path.dirname(LOG_FILE)):
+    for d in (BACKUP_DIR, CODE_BACKUP_DIR, os.path.dirname(LOG_FILE)):
         os.makedirs(d, exist_ok=True)
     return True

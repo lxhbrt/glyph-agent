@@ -30,6 +30,7 @@ except Exception:
     pass
 
 from core import config, tool_loop, llm
+from core import code_loop
 
 PORT = int(os.environ.get("GLYPH_AGENT_PORT", "18899"))
 HOST = os.environ.get("GLYPH_AGENT_HOST", "127.0.0.1")
@@ -91,13 +92,22 @@ def _handle_chat(payload, send=None):
     # Textanhänge in die Nachricht einbetten (deutlich gekennzeichnet),
     # damit das Modell den Inhalt als Kontext bekommt.
     message = _embed_attachments(message, attachments)
-    if not message.strip():
+    # Resume nach Glyph-Genehmigung darf ohne neue message laufen.
+    is_resume = bool((payload or {}).get("resume_token"))
+    if not message.strip() and not is_resume:
         err = {"ok": False, "answer": "Leere Nachricht.", "rounds": 0, "tool_calls": []}
         if send:
             send({"type": "done", **err})
         return err
 
-    if getattr(config, "MODE", "agent") == "openrouter-chat":
+    # Per-Request-Modus (C′): Payload.mode hat Vorrang; sonst Prozess-MODE.
+    # "code" = ^_Code (DeepSeek + Workspace-Tools); Default = Vault-Agent.
+    if (payload or {}).get("mode"):
+        req_mode = str((payload or {}).get("mode")).lower()
+    else:
+        req_mode = str(getattr(config, "MODE", "agent") or "agent").lower()
+
+    if req_mode == "openrouter-chat":
         # Reiner OpenRouter-Chat: KEIN Tool-Loop, KEIN Vault, KEINE Tools.
         from core import llm as _llm
         system = (
@@ -119,7 +129,7 @@ def _handle_chat(payload, send=None):
                 send({"type": "done", **res})
             return res
 
-    # Agentenmodus: kontrollierter Tool-Loop mit Bestätigung für Schreib-Tools.
+    # Bestätigungsliste aus Payload (write-Tools / Shell).
     confirm_allow = (payload or {}).get("confirm")
     def confirm(tool_name, args):
         if not isinstance(confirm_allow, list):
@@ -130,10 +140,43 @@ def _handle_chat(payload, send=None):
         return False
 
     def on_event(event):
-        # Live-Stufe/Teil-Antwort nach außen reichen (Streaming), wenn send genutzt wird.
         if send:
             send(event)
 
+    # --- CODE-Modus (^_Code): DeepSeek + Workspace-Tools, kein Vault ---
+    if req_mode == "code":
+        resume_token = (payload or {}).get("resume_token")
+        allow_pending = (payload or {}).get("allow_pending")
+        # allow_pending kann True/False sein; None = kein Resume
+        if resume_token is not None and allow_pending is None and (payload or {}).get("allow") is not None:
+            allow_pending = bool((payload or {}).get("allow"))
+        result = code_loop.run_code(
+            message,
+            confirm=confirm,
+            on_event=on_event,
+            resume_token=resume_token,
+            allow_pending=allow_pending,
+        )
+        p = llm.get_provider()
+        used_model = (
+            (result.get("trace") or {}).get("model")
+            or getattr(config, "CODE_OPENROUTER_MODEL", None)
+            or getattr(p, "_active_model", None)
+            or p.model_name
+        )
+        result = {
+            "used_provider": p.provider_name,
+            "used_model": used_model,
+            "mode": "code",
+            **result,
+        }
+        if "pending_confirmation" not in result:
+            result["pending_confirmation"] = False
+        if send:
+            send({"type": "done", **result})
+        return result
+
+    # Agentenmodus: kontrollierter Tool-Loop mit Bestätigung für Schreib-Tools.
     result = tool_loop.run(message, confirm=confirm, on_event=on_event)
     # Modell-Info anhängen (Primär Luna oder Free-Fallback).
     p = llm.get_provider()
@@ -141,6 +184,7 @@ def _handle_chat(payload, send=None):
     result = {
         "used_provider": p.provider_name,
         "used_model": used_model,
+        "mode": "agent",
         "pending_confirmation": False,
         **result,
     }
@@ -151,11 +195,19 @@ def _handle_chat(payload, send=None):
 
 def _handle_health():
     p = llm.get_provider()
-    return {"status": "ok", "provider": p.provider_name, "model": p.model_name}
+    return {
+        "status": "ok",
+        "provider": p.provider_name,
+        "model": p.model_name,
+        "code_model": getattr(config, "CODE_OPENROUTER_MODEL", None),
+        "modes": ["agent", "code", "openrouter-chat"],
+    }
 
 
 def main():
-    from http.server import BaseHTTPRequestHandler, HTTPServer
+    # ThreadingHTTPServer: ein hängender /chat blockiert nicht /health und
+    # andere Requests (Kern-Fix gegen Server-Einfrieren bei OpenRouter-Hang).
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):  # leiser
@@ -233,9 +285,15 @@ def main():
                 file=sys.stderr,
             )
             sys.exit(1)
-    server = HTTPServer((HOST, PORT), Handler)
+    server = ThreadingHTTPServer((HOST, PORT), Handler)
+    # Daemon-Threads: Server-Stop wartet nicht auf hängende Chat-Worker.
+    server.daemon_threads = True
     print(f"glyph-agent HTTP-Dienst läuft auf http://{HOST}:{PORT}")
     print(f"  Provider: {provider.provider_name}, Modell: {provider.model_name}")
+    print(
+        f"  Timeout: CHAT={getattr(config, 'CHAT_TIMEOUT', 60)}s "
+        f"CODE={getattr(config, 'CODE_CHAT_TIMEOUT', 60)}s · threaded"
+    )
     print("  POST /chat  |  GET /health")
     try:
         server.serve_forever()

@@ -16,6 +16,7 @@ from . import vault_tools, web, retrieval
 
 # --- Tool-Schema (wird auch dem Modell im System-Prompt beschrieben) ---
 
+# Vault/Recherche-Tools (MODE=agent) — kein Shell, nur Vault-Roots.
 TOOLS = [
     {
         "name": "VaultFind",
@@ -103,13 +104,67 @@ TOOLS = [
     },
 ]
 
+# CODE-Tools (^_Code / MODE=code) — Workspace-Roots, kein VaultFind.
+CODE_TOOLS = [
+    {
+        "name": "ListDir",
+        "description": "Listet Dateien/Ordner relativ zu einem Workspace-Root (nicht rekursiv).",
+        "args": {"path": "str (optional, Default '.')"},
+        "write": False,
+    },
+    {
+        "name": "ReadFile",
+        "description": "Liest eine Datei innerhalb der CODE_WORKSPACE_ROOTS (Text, UTF-8).",
+        "args": {"path": "str"},
+        "write": False,
+    },
+    {
+        "name": "WriteFile",
+        "description": (
+            "Schreibt/überschreibt eine Datei (kompletter Inhalt) mit Backup. "
+            "Benötigt Glyph-Genehmigung. Kein Löschen."
+        ),
+        "args": {"path": "str", "content": "str, kompletter neuer Dateiinhalt"},
+        "write": True,
+    },
+    {
+        "name": "RunCommand",
+        "description": (
+            "Führt einen Whitelist-Shell-Befehl im Workspace aus (z.B. git status, "
+            "npm test, pytest, ls). Benötigt Glyph-Genehmigung. Kein rm/sudo."
+        ),
+        "args": {
+            "command": "str",
+            "cwd": "str (optional, relativ zu Root)",
+            "timeout": "int Sekunden optional, max 120",
+        },
+        "write": True,  # Genehmigungspflicht wie Write
+    },
+]
+
 TOOL_MAP = {t["name"]: t for t in TOOLS}
+CODE_TOOL_MAP = {t["name"]: t for t in CODE_TOOLS}
 
 
-def tool_schema_prompt():
+def tools_for_mode(mode="agent"):
+    """Tool-Liste je Betriebsart."""
+    m = (mode or "agent").lower()
+    if m == "code":
+        return CODE_TOOLS
+    return TOOLS
+
+
+def tool_map(mode="agent"):
+    m = (mode or "agent").lower()
+    if m == "code":
+        return CODE_TOOL_MAP
+    return TOOL_MAP
+
+
+def tool_schema_prompt(mode="agent"):
     """Erzeugt die Tool-Beschreibung für den System-Prompt des Modells."""
-    lines = ["Verfügbare Werkzeuge (antworte mit JSON {\"tool\": Name, \"args\": {...}}):"]
-    for t in TOOLS:
+    lines = ['Verfügbare Werkzeuge (antworte mit JSON {"tool": Name, "args": {...}}):']
+    for t in tools_for_mode(mode):
         args = ", ".join(f"{k}:{v}" for k, v in t["args"].items())
         lines.append(f"- {t['name']}({args}) — {t['description']}")
     return "\n".join(lines)
@@ -155,21 +210,25 @@ def try_parse_tool_call(text):
     return None
 
 
-def execute(tool_name, args, confirm=None):
+def execute(tool_name, args, confirm=None, mode="agent"):
     """
     Führt ein Tool kontrolliert aus.
 
     confirm: optionaler Callback confirm(tool_name, args) -> bool.
       Für write=True-Tools wird confirm genau dann aufgerufen; wenn er
       False liefert oder fehlt (und das Tool write=True ist), wird NICHT
-      ausgeführt. Liefert (ok, result_or_error_message).
+      ausgeführt.
+
+    mode: "agent" (Vault) | "code" (^_Code Workspace-Tools)
 
     Rückgabe: dict {"ok": bool, "result": ..., "error": str|None}
     """
-    tool = TOOL_MAP.get(tool_name)
+    mode = (mode or "agent").lower()
+    tmap = tool_map(mode)
+    tool = tmap.get(tool_name)
     if tool is None:
         return {"ok": False, "result": None,
-                "error": f"Unbekanntes Tool '{tool_name}'. Erlaubt: {', '.join(TOOL_MAP)}"}
+                "error": f"Unbekanntes Tool '{tool_name}'. Erlaubt: {', '.join(tmap)}"}
 
     # Bestätigung für Schreib-Tools erzwingen
     if tool["write"]:
@@ -181,48 +240,74 @@ def execute(tool_name, args, confirm=None):
                     "error": "Schreib-Vorgang vom Nutzer abgebrochen."}
 
     try:
-        if tool_name in ("VaultFind", "VaultRecall", "VaultSearch"):
-            # Ein Hybrid-Werkzeug; Aliase teilen dieselbe Implementierung.
-            q = args.get("query", "")
-            top_k = int(args.get("top_k") or args.get("limit") or 4)
-            min_score = float(args.get("min_score", 0.35))
-            res = retrieval.vault_find(q, top_k=top_k, min_score=min_score)
-            return {"ok": True, "result": res}
-        if tool_name == "ReadNote":
-            res = vault_tools.read_note(args.get("path"))
-            return {"ok": True, "result": res}
-        if tool_name == "Summarize":
-            # Führt die Zusammenfassung über den Agenten aus (LLM liest + fasst zusammen)
-            from . import agent as agent_mod
-            res = agent_mod.summarize_note(args.get("path"), args.get("hint", ""))
-            return {"ok": True, "result": res}
-        if tool_name == "CreateNote":
-            res = vault_tools.create_note(args.get("path"), args.get("content", ""))
-            return {"ok": True, "result": res}
-        if tool_name == "ProposeEdit":
-            from . import agent as agent_mod
-            prop = agent_mod.build_edit_proposal(args.get("path"), args.get("instruction", ""))
-            return {"ok": True, "result": prop}
-        if tool_name == "ApplyEdit":
-            res = vault_tools.apply_edit(args.get("path"), args.get("new_content", ""))
-            return {"ok": True, "result": res}
-        if tool_name == "WebSearch":
-            res = web.web_search(
-                args.get("query", ""),
-                count=int(args.get("count", 5)),
-                source=args.get("source", "exa"),
-            )
-            return {"ok": True, "result": res}
-        if tool_name == "ExtractUrl":
-            res = web.extract_tinyfish(args.get("url", ""), args.get("goal", ""))
-            return {"ok": True, "result": res}
-        if tool_name == "FetchUrl":
-            res = web.fetch_tinyfish(args.get("url", ""), "markdown")
-            return {"ok": True, "result": res}
-        if tool_name == "ObsidianOpen":
-            res = vault_tools.obsidian_open(args.get("path", ""))
-            return {"ok": True, "result": res}
+        if mode == "code":
+            return _execute_code(tool_name, args or {})
+        return _execute_agent(tool_name, args or {})
     except Exception as e:
         return {"ok": False, "result": None, "error": str(e)}
 
+
+def _execute_agent(tool_name, args):
+    if tool_name in ("VaultFind", "VaultRecall", "VaultSearch"):
+        q = args.get("query", "")
+        top_k = int(args.get("top_k") or args.get("limit") or 4)
+        min_score = float(args.get("min_score", 0.35))
+        res = retrieval.vault_find(q, top_k=top_k, min_score=min_score)
+        return {"ok": True, "result": res}
+    if tool_name == "ReadNote":
+        res = vault_tools.read_note(args.get("path"))
+        return {"ok": True, "result": res}
+    if tool_name == "Summarize":
+        from . import agent as agent_mod
+        res = agent_mod.summarize_note(args.get("path"), args.get("hint", ""))
+        return {"ok": True, "result": res}
+    if tool_name == "CreateNote":
+        res = vault_tools.create_note(args.get("path"), args.get("content", ""))
+        return {"ok": True, "result": res}
+    if tool_name == "ProposeEdit":
+        from . import agent as agent_mod
+        prop = agent_mod.build_edit_proposal(args.get("path"), args.get("instruction", ""))
+        return {"ok": True, "result": prop}
+    if tool_name == "ApplyEdit":
+        res = vault_tools.apply_edit(args.get("path"), args.get("new_content", ""))
+        return {"ok": True, "result": res}
+    if tool_name == "WebSearch":
+        res = web.web_search(
+            args.get("query", ""),
+            count=int(args.get("count", 5)),
+            source=args.get("source", "exa"),
+        )
+        return {"ok": True, "result": res}
+    if tool_name == "ExtractUrl":
+        res = web.extract_tinyfish(args.get("url", ""), args.get("goal", ""))
+        return {"ok": True, "result": res}
+    if tool_name == "FetchUrl":
+        res = web.fetch_tinyfish(args.get("url", ""), "markdown")
+        return {"ok": True, "result": res}
+    if tool_name == "ObsidianOpen":
+        res = vault_tools.obsidian_open(args.get("path", ""))
+        return {"ok": True, "result": res}
+    return {"ok": False, "result": None, "error": f"Tool '{tool_name}' nicht implementiert."}
+
+
+def _execute_code(tool_name, args):
+    from . import code_tools
+    if tool_name == "ListDir":
+        res = code_tools.list_dir(args.get("path") or ".")
+        return {"ok": True, "result": res}
+    if tool_name == "ReadFile":
+        res = code_tools.read_file(args.get("path"))
+        return {"ok": True, "result": res}
+    if tool_name == "WriteFile":
+        res = code_tools.write_file(args.get("path"), args.get("content", ""))
+        return {"ok": True, "result": res}
+    if tool_name == "RunCommand":
+        timeout = args.get("timeout")
+        res = code_tools.run_command(
+            args.get("command", ""),
+            cwd=args.get("cwd"),
+            timeout=int(timeout) if timeout is not None else None,
+        )
+        # exit_code != 0 ist kein Tool-Fehler — Ergebnis trotzdem ok
+        return {"ok": True, "result": res}
     return {"ok": False, "result": None, "error": f"Tool '{tool_name}' nicht implementiert."}

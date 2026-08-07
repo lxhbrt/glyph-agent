@@ -30,3 +30,10 @@ _Avoid_: „3-Stufen-Fallback“ / lokaler Chat-Fallback (existiert nicht mehr; 
 - Domain-Doku: eigenes `CONTEXT.md` hier (Engine); Glyph-UI hat eigenes CONTEXT — zwei Kontexte.
 - Live-Test „grün“: Antwort + Steps **und** VaultFind erkennbar (Q8=B).
 - Kein ADR nötig — CONTEXT reicht (Q9=C).
+
+## Settled decisions (C′ 2026-08-07)
+
+- **glyph-agent Default** bleibt **Vault-only** (kein Shell, kein allgemeines Repo-Schreiben).
+- **`MODE=code`** (per Request `mode: "code"`): ^_Code-Pfad — Tools `ListDir` / `ReadFile` / `WriteFile` / `RunCommand`, Denker `CODE_OPENROUTER_MODEL` (Default `deepseek/deepseek-v4-flash-0731`).
+- Write/Shell brauchen **Glyph-Genehmigung** (`pending_confirmation` + `resume_token`); nie auto-approve.
+- Shell: Whitelist + Deny-Liste + Timeout + nur `CODE_WORKSPACE_ROOTS`.

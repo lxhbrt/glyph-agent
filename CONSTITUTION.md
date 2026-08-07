@@ -17,7 +17,9 @@ Nutzerfrage
 |-------|-----|--------|
 | **Gedächtnis / Suche** | lokal: bge-m3 + Keyword, Vault-Tools | Cloud-Embeddings |
 | **Denken / Antwort** | OpenRouter `openai/gpt-5.6-luna` → free | lokaler Chat |
-| **UI / Build** | Glyph-UI: Grok = Build, Claude = Code, glyph-agent = Vault/Tools + Cloud-Antwort | Profile verwechseln |
+| **UI / Build** | Glyph-UI: **Grok** = Build | Profile verwechseln |
+| **UI / Code** | Glyph-UI: **`^_Code`** = DeepSeek V4 Flash via OpenRouter + Workspace-Tools (Read/Write/Shell-Whitelist), Genehmigung in Glyph | Claude OAuth / Shell im Vault-Agent |
+| **UI / Vault** | Glyph-UI: **glyph-agent** = Vault/Tools + Cloud-Antwort (kein Shell) | Code-Schreiben außerhalb Vault |
 
 Ollama bleibt **nur** für lokale Embeddings (`bge-m3`), nicht als Antwort-KI.  
 **Kein** lokaler Chat-Fallback. Wenn Luna und Free scheitern: harter Fehler.
