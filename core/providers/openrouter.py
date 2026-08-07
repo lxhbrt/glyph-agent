@@ -12,10 +12,18 @@ WICHTIG (Datenschutz):
 Dieser Provider sendet den übergebenen Text an OpenRouter (Cloud).
 Der Tool-Loop entscheidet, was hier ankommt — nur minimierte Ausschnitte,
 nie der vollständige Vault. Key: OPENROUTER_API_KEY aus .env.
+
+Timeout (Stabilität):
+  Socket-Timeout allein reicht nicht — resp.read() kann hängen.
+  _chat_completion erzwingt ein hartes Total-Timeout (Wall-Clock) per
+  Worker-Thread + future.result(deadline), analog extract_tinyfish.
 """
 import json
 import logging
 import os
+import socket
+import threading
+import urllib.error
 import urllib.request
 
 from . import ModelProvider
@@ -23,6 +31,26 @@ from .. import log as _agent_log
 from .. import config as _cfg
 
 log = logging.getLogger("glyph-agent.openrouter")
+
+
+def _resolve_chat_timeout(timeout=None):
+    """Wall-Clock-Sekunden für einen OpenRouter-Chat-Call."""
+    if timeout is not None:
+        try:
+            return max(1, int(timeout))
+        except (TypeError, ValueError):
+            pass
+    mode = getattr(_cfg, "MODE", "agent") or "agent"
+    if str(mode).lower() == "code":
+        raw = getattr(_cfg, "CODE_CHAT_TIMEOUT", None)
+    else:
+        raw = getattr(_cfg, "CHAT_TIMEOUT", None)
+    if raw is None:
+        raw = getattr(_cfg, "CHAT_TIMEOUT", 60)
+    try:
+        return max(1, int(raw or 60))
+    except (TypeError, ValueError):
+        return 60
 
 
 class OpenRouterProvider(ModelProvider):
@@ -74,9 +102,16 @@ class OpenRouterProvider(ModelProvider):
                 "Cloud-Modell nicht verfügbar."
             )
 
-    def _chat_completion(self, messages, temperature, timeout=60, model=None):
+    def _chat_completion(self, messages, temperature, timeout=None, model=None):
+        """Chat-Completions mit hartem Total-Timeout.
+
+        urlopen(timeout=…) ist nur Socket-Timeout; resp.read() kann trotzdem
+        hängen. Deshalb: Request im Worker, future.result(timeout=wall) bricht
+        den Caller hart ab (Thread kann nachlaufen bis Socket-Timeout greift).
+        """
         self._ensure_key()
         m = model or self.model
+        wall = _resolve_chat_timeout(timeout)
         total_chars = sum(len(x.get("content", "")) for x in messages)
         _agent_log.log(
             "cloud_send",
@@ -84,6 +119,7 @@ class OpenRouterProvider(ModelProvider):
             model=m,
             chars=total_chars,
             n_messages=len(messages),
+            timeout=wall,
         )
         payload = {
             "model": m,
@@ -100,16 +136,70 @@ class OpenRouterProvider(ModelProvider):
             },
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+
+        box = {"data": None, "err": None}
+
+        def _do_request():
+            try:
+                # Socket-Timeout ≤ Wall, damit der Worker nicht ewig nachläuft.
+                with urllib.request.urlopen(req, timeout=wall) as resp:
+                    raw = resp.read()
+                box["data"] = json.loads(raw.decode("utf-8"))
+            except Exception as e:
+                box["err"] = e
+
+        # Daemon-Thread: Total-Timeout per join(deadline); Prozess-Exit wartet nicht.
+        # (ThreadPoolExecutor-Worker sind non-daemon und halten Tests/Shutdown auf.)
+        worker = threading.Thread(
+            target=_do_request,
+            name=f"or-chat-{m[:24]}",
+            daemon=True,
+        )
+        worker.start()
+        worker.join(timeout=wall)
+        if worker.is_alive():
+            log.warning(
+                "OpenRouter chat total-timeout nach %ss (model=%s)",
+                wall, m,
+            )
+            try:
+                _agent_log.log(
+                    "cloud_timeout",
+                    provider=self.provider_name,
+                    model=m,
+                    timeout=wall,
+                )
+            except Exception:
+                pass
+            raise TimeoutError(
+                f"OpenRouter chat timeout nach {wall}s (model={m})"
+            )
+
+        if box["err"] is not None:
+            e = box["err"]
+            if isinstance(e, socket.timeout):
+                raise TimeoutError(
+                    f"OpenRouter chat timeout nach {wall}s (model={m}): {e}"
+                ) from e
+            if isinstance(e, urllib.error.URLError):
+                reason = getattr(e, "reason", e)
+                if isinstance(reason, socket.timeout) or "timed out" in str(e).lower():
+                    raise TimeoutError(
+                        f"OpenRouter chat timeout nach {wall}s (model={m}): {e}"
+                    ) from e
+            raise e
+
+        data = box["data"] or {}
         return (data.get("choices") or [{}])[0].get("message", {}).get("content", "").strip()
 
-    def _with_free_fallback(self, messages, temperature):
+    def _with_free_fallback(self, messages, temperature, timeout=None):
         """Primär → Free. Setzt last_used / _active_model.
         Ohne API-Key kein Free-Versuch (gleicher Key, gleicher Fail)."""
         self._ensure_key()
         try:
-            text = self._chat_completion(messages, temperature, model=self.model)
+            text = self._chat_completion(
+                messages, temperature, timeout=timeout, model=self.model
+            )
             self.last_used = "openrouter"
             self._active_model = self.model
             return text
@@ -120,23 +210,26 @@ class OpenRouterProvider(ModelProvider):
                 "OpenRouter '%s' fehlgeschlagen (%s) — Free-Modell '%s'",
                 self.model, e1, self.fallback_model,
             )
-            text = self._chat_completion(messages, temperature, model=self.fallback_model)
+            text = self._chat_completion(
+                messages, temperature, timeout=timeout, model=self.fallback_model
+            )
             self.last_used = "openrouter:free"
             self._active_model = self.fallback_model
             return text.rstrip() + (
                 f"\n\n_(OpenRouter: kostenloses Modell {self.fallback_model} verwendet.)_"
             )
 
-    def generate(self, prompt, temperature=0.3, num_ctx=8192):
+    def generate(self, prompt, temperature=0.3, num_ctx=8192, timeout=None):
         return self._with_free_fallback(
-            [{"role": "user", "content": prompt}], temperature
+            [{"role": "user", "content": prompt}], temperature, timeout=timeout
         )
 
-    def chat(self, system, user, temperature=0.3, num_ctx=8192):
+    def chat(self, system, user, temperature=0.3, num_ctx=8192, timeout=None):
         return self._with_free_fallback(
             [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
             temperature,
+            timeout=timeout,
         )

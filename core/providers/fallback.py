@@ -62,6 +62,8 @@ class FallbackProvider(OpenRouterProvider):
         )
 
     def _cloud(self, kind, args, kwargs, model):
+        # Nutzt OpenRouterProvider._chat_completion (hartes Total-Timeout).
+        timeout = kwargs.get("timeout")
         if kind == "chat":
             system, user = args
             temperature = kwargs.get("temperature", 0.3)
@@ -71,57 +73,34 @@ class FallbackProvider(OpenRouterProvider):
                     {"role": "user", "content": user},
                 ],
                 temperature,
+                timeout=timeout,
                 model=model,
             )
         prompt = args[0]
         temperature = kwargs.get("temperature", 0.3)
         return self._chat_completion(
-            [{"role": "user", "content": prompt}], temperature, model=model
+            [{"role": "user", "content": prompt}],
+            temperature,
+            timeout=timeout,
+            model=model,
         )
 
-    def _chat_completion(self, messages, temperature, timeout=60, model=None):
-        self._ensure_key()
-        m = model or self.model
-        try:
-            from .. import log as _al
-            _al.log(
-                "cloud_send",
-                provider="openrouter",
-                model=m,
-                chars=sum(len(x.get("content", "")) for x in messages),
-                n_messages=len(messages),
-            )
-        except Exception:
-            pass
-        import json
-        import urllib.request
-        payload = {
-            "model": m,
-            "messages": messages,
-            "temperature": temperature,
-            "stream": False,
-        }
-        req = urllib.request.Request(
-            f"{self.url}/chat/completions",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.api_key}",
-            },
-            method="POST",
+    def chat(self, system, user, temperature=0.3, num_ctx=8192, timeout=None):
+        text, used = self._call(
+            "chat",
+            (system, user),
+            {"temperature": temperature, "timeout": timeout},
         )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        return (data.get("choices") or [{}])[0].get("message", {}).get("content", "").strip()
-
-    def chat(self, system, user, temperature=0.3, num_ctx=8192):
-        text, used = self._call("chat", (system, user), {"temperature": temperature})
         if used == "openrouter:free":
             text = text.rstrip() + (
                 f"\n\n_(OpenRouter: kostenloses Modell {self.fallback_model} verwendet.)_"
             )
         return text
 
-    def generate(self, prompt, temperature=0.3, num_ctx=8192):
-        text, _used = self._call("generate", (prompt,), {"temperature": temperature})
+    def generate(self, prompt, temperature=0.3, num_ctx=8192, timeout=None):
+        text, _used = self._call(
+            "generate",
+            (prompt,),
+            {"temperature": temperature, "timeout": timeout},
+        )
         return text
