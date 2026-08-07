@@ -16,6 +16,8 @@ nicht fest im Code.
 """
 import json
 import os
+import socket
+import time
 import urllib.request
 import urllib.parse
 
@@ -115,14 +117,20 @@ def search_tinyfish(query, count=5, location="DE", language="de"):
     return out
 
 
-def extract_tinyfish(url, goal):
+def extract_tinyfish(url, goal, timeout=None):
     """
     Besucht eine konkrete URL und extrahiert strukturierte Daten (JSON) nach
     `goal`. Hauptnutzen von TinyFish: Navigation + Extraktion auf Zielseite.
-    Liefert das von TinyFish gelieferte Ergebnis (dict/str).
+
+    time-bounded: Ein hänger/zu-langsamer PDF- oder Seiten-Abruf darf die gesamte
+    Agenten-Antwort nicht blockieren. `timeout` (Sekunden, Default 12) erzwingt
+    einen harten Abbruch: nach Ablauf wird KEIN weiteres COMPLETE abgewartet,
+    sondern sofort ein schnelles {"error": "timeout"} geliefert, damit der
+    Tool-Loop weiterarbeiten kann statt im ReAct-Nachlauf 40+ s festzuhängen.
     """
     if not url or not goal:
         raise RuntimeError("extract_tinyfish braucht url und goal.")
+    timeout = timeout if timeout is not None else 12
     payload = json.dumps({"url": url, "goal": goal}).encode("utf-8")
     req = urllib.request.Request(
         TINYFISH_EXTRACT,
@@ -133,11 +141,21 @@ def extract_tinyfish(url, goal):
         },
         method="POST",
     )
-    # SSE wird hier konsequent als Ganzes eingelesen (kein Piping-Problem).
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        raw = resp.read().decode("utf-8")
+    try:
+        # SSE wird hier konsequent als Ganzes eingelesen, aber NUR bis `timeout`.
+        # PDFs/JS-Seiten, die nicht in der Zeit ein COMPLETE liefern, werden so
+        # schnell abgebrochen statt den Request unnötig am Leben zu halten.
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8")
+    except (socket.timeout, TimeoutError):
+        return {"error": f"timeout nach {timeout}s", "url": url}
+    except Exception as e:
+        return {"error": f"fetch fehlgeschlagen: {e}", "url": url}
     found = None
+    deadline = time.monotonic() + timeout
     for line in raw.splitlines():
+        if time.monotonic() > deadline:
+            return {"error": f"timeout nach {timeout}s (Parsing)", "url": url}
         line = line.strip()
         if not line.startswith("data: "):
             continue
@@ -149,7 +167,7 @@ def extract_tinyfish(url, goal):
             found = d.get("result")
         elif d.get("type") == "ERROR" or d.get("status") == "FAILED":
             return {"error": line[6:]}
-    return found if found is not None else {"status": "kein COMPLETE"}
+    return found if found is not None else {"error": "kein COMPLETE", "url": url}
 
 
 def fetch_tinyfish(url, fmt="markdown"):
