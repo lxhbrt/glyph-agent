@@ -323,7 +323,15 @@ def _run_self_id(user_message):
     }
 
 
-def run(user_message, system_extra=None, confirm=None, max_rounds=MAX_ROUNDS, on_event=None, images=None):
+def run(
+    user_message,
+    system_extra=None,
+    confirm=None,
+    max_rounds=MAX_ROUNDS,
+    on_event=None,
+    images=None,
+    conversation_history=None,
+):
     """
     Führt eine Nutzer-Anfrage durch den Tool-Loop aus.
 
@@ -334,6 +342,8 @@ def run(user_message, system_extra=None, confirm=None, max_rounds=MAX_ROUNDS, on
                {type: "step", action: <name>, status: "start|done|error", detail: str}
                {type: "answer", status: "start"|"content", text: str}  (Antworttext-Stream)
     images: optionale OpenAI image_url-Parts (Vision) für den ersten Nutzerturn.
+    conversation_history: optionale prior Turns [{role, content}, ...] (ohne/mit
+             aktueller message — Duplikat wird verworfen). Für Multi-Turn-Nachfragen.
              Rückgabe: dict {"answer": str, "rounds": int, "tool_calls": [..], "ok": bool}
     """
     def _emit(event):
@@ -356,6 +366,18 @@ def run(user_message, system_extra=None, confirm=None, max_rounds=MAX_ROUNDS, on
     if not images and _is_self_id_question(user_message):
         return _run_self_id(user_message)
 
+    from . import history as chat_history
+
+    prior_history, history = chat_history.build_history_for_loop(
+        user_message, conversation_history
+    )
+    if prior_history:
+        log.log(
+            "chat_history",
+            prior_msgs=len(prior_history),
+            prior_chars=sum(len(m["content"]) for m in prior_history),
+        )
+
     tool_prompt = tool_registry.tool_schema_prompt()
     system = _ROLE + "\n\n" + tool_prompt + (
         "\n\nWICHTIG: Wenn du ein Werkzeug brauchst, antworte NUR mit JSON "
@@ -365,6 +387,14 @@ def run(user_message, system_extra=None, confirm=None, max_rounds=MAX_ROUNDS, on
             "\nDu kannst angehängte Bilder SEHEN (Vision). Beschreibe und analysiere "
             "sie, wenn der Nutzer ein Bild mitschickt."
             if images
+            else ""
+        )
+        + (
+            "\nMulti-Turn: Es liegt Chat-Verlauf vor. Bei Nachfragen (z.B. „die drei“, "
+            "„davon“, „erfahrungsberichte dazu“) nutze Fakten/Produkte/Namen aus dem "
+            "Verlauf. Nicht von vorn recherchieren, außer der Nutzer will bewusst neu "
+            "oder es fehlen Belege."
+            if prior_history
             else ""
         )
     ) + _RESEARCH_REQUIREMENT + "\n" + research.policy_prompt_snippet()
@@ -382,6 +412,9 @@ def run(user_message, system_extra=None, confirm=None, max_rounds=MAX_ROUNDS, on
         "- AUSNAHME Identität/Modell/Meta: freistil aus Runtime (Profil glyph-agent, "
         "Cloud-Denker openai/gpt-5.6-luna über OpenRouter, Free nur bei Ausfall). "
         "Kein Vault, kein 'steht nicht im Tool-Ergebnis', kein starres Template.\n"
+        "- Chat-Verlauf (wenn vorhanden): Produktnamen, Modelle und getroffene "
+        "Vergleiche daraus für Nachfragen nutzen — nicht so tun, als wüsstest du "
+        "nicht, worum es geht.\n"
         "- Erfinde KEINE Fach-Fakten, Fristen, Pflichten, Paragrafen.\n"
         "- Antworte auf Deutsch; Ton freistil. Quellen (Dateipfad) nur wenn sie "
         "die Fachfrage wirklich belegen.\n"
@@ -389,10 +422,15 @@ def run(user_message, system_extra=None, confirm=None, max_rounds=MAX_ROUNDS, on
         "\n" + STOP_SLOP
     )
 
-    history = [{"role": "user", "content": user_message}]
     tool_calls = []
     rounds = 0
     steps = []  # chronologische UI-Schritte (B+ Transparenz)
+    if prior_history:
+        steps.append({
+            "step": "history",
+            "status": "success",
+            "detail": f"{len(prior_history)} prior msg(s)",
+        })
     if images:
         steps.append({"step": "Vision", "status": "success", "detail": f"{len(images)} Bild(er)"})
         _emit({"type": "step", "action": "Vision", "status": "start",
@@ -567,15 +605,26 @@ def run(user_message, system_extra=None, confirm=None, max_rounds=MAX_ROUNDS, on
                 # mit Vault+Web-Tool-Ergebnissen) wird anhängt; der System-Prompt trägt
                 # zusätzlich die answer_system-Belegpflicht. Ein OpenRouter-Round-Trip.
                 final = call_llm(
-                    _final_messages(user_message, tool_results),
+                    _final_messages(user_message, tool_results, prior_history=prior_history),
                     extra_system=answer_system,
                 )
                 _emit({"type": "answer", "status": "content", "text": final})
                 steps.append({"step": "answer", "status": "success", "detail": f"{len(final)} Zeichen"})
-                log.log("agent_final", rounds=rounds, chars=len(final), single_call=True)
+                log.log(
+                    "agent_final",
+                    rounds=rounds,
+                    chars=len(final),
+                    single_call=True,
+                    prior_msgs=len(prior_history or []),
+                )
                 return {"answer": final, "rounds": rounds, "tool_calls": tool_calls, "ok": True,
                         "trace": _build_trace(tool_calls, tool_results, steps=steps)}
-            log.log("agent_reply", rounds=rounds, direct=True)
+            log.log(
+                "agent_reply",
+                rounds=rounds,
+                direct=True,
+                prior_msgs=len(prior_history or []),
+            )
             steps.append({"step": "answer", "status": "success", "detail": "direkt"})
             return {"answer": reply, "rounds": rounds, "tool_calls": tool_calls, "ok": True,
                     "trace": _build_trace(tool_calls, tool_results, steps=steps)}
@@ -602,12 +651,19 @@ def run(user_message, system_extra=None, confirm=None, max_rounds=MAX_ROUNDS, on
             _emit({"type": "step", "action": "OpenRouter", "status": "done",
                    "detail": "formuliert finale Antwort (Single-Call, Cancel direkt)"})
             final = call_llm(
-                _final_messages(user_message, tool_results),
+                _final_messages(user_message, tool_results, prior_history=prior_history),
                 extra_system=answer_system,
             )
             _emit({"type": "answer", "status": "content", "text": final})
             steps.append({"step": "answer", "status": "success", "detail": f"{len(final)} Zeichen"})
-            log.log("agent_final", rounds=rounds, chars=len(final), single_call=True, cancel_direct=True)
+            log.log(
+                "agent_final",
+                rounds=rounds,
+                chars=len(final),
+                single_call=True,
+                cancel_direct=True,
+                prior_msgs=len(prior_history or []),
+            )
             return {"answer": final, "rounds": rounds, "tool_calls": tool_calls, "ok": True,
                     "trace": _build_trace(tool_calls, tool_results, steps=steps)}
 
@@ -644,14 +700,14 @@ def run(user_message, system_extra=None, confirm=None, max_rounds=MAX_ROUNDS, on
         if not result.get("ok"):
             # Single-Call: Striktheitsregeln in denselben Call integrieren (kein 2. Round-Trip).
             final = call_llm(
-                [
-                    {"role": "user", "content": f"Ursprüngliche Frage: {user_message}"},
-                    {"role": "user", "content": (
-                        "Tool-Ergebnisse (deine ausschließliche Belegbasis):\n\n"
-                        + _fmt_tool_results(tool_results)
-                        + "\n\nEin Tool meldete einen Fehler. Erkläre knapp, was passiert ist und was fehlt."
-                    )},
-                ],
+                _final_messages(
+                    user_message,
+                    tool_results,
+                    prior_history=prior_history,
+                    extra_instruction=(
+                        "Ein Tool meldete einen Fehler. Erkläre knapp, was passiert ist und was fehlt."
+                    ),
+                ),
                 extra_system=answer_system,
             )
             steps.append({"step": "answer", "status": "error", "detail": "nach Tool-Fehler"})
@@ -915,23 +971,53 @@ def _fmt_tool_results(tool_results):
     return body
 
 
-def _final_messages(user_message, tool_results):
+def _final_messages(
+    user_message,
+    tool_results,
+    prior_history=None,
+    extra_instruction=None,
+):
     """Baut die user-Messages für den Single-Call-Final (0.3).
 
     Statt eines separaten zweiten LLM-Calls (answer_system als eigener Chat) wird
     die finale Antwort über EINEN Call formuliert, dessen System-Prompt die
     Striktheitsregeln (answer_system) trägt. Die Tool-Ergebnisse (= Belegbasis)
     kommen aus tool_results (formatierte Quellen), die ursprüngliche Frage bleibt
-    als Kontext erhalten. Rückgabe: Liste von {"role":"/content"}-Messages.
+    als Kontext erhalten. Prior Chat-Turns kommen voran (Nachfragen).
+    Rückgabe: Liste von {"role":"/content"}-Messages.
     """
-    return [
-        {"role": "user", "content": f"Ursprüngliche Frage des Nutzers: {user_message}"},
-        {"role": "user", "content": (
-            "Tool-Ergebnisse (deine ausschließliche Belegbasis):\n\n"
+    from . import history as chat_history
+
+    msgs = []
+    prior_block = chat_history.format_prior_block(prior_history or [])
+    if prior_block:
+        msgs.append({
+            "role": "user",
+            "content": (
+                "Bisheriger Chat-Verlauf (Kontext für diese Nachfrage — "
+                "Produktnamen/Fakten daraus nutzen, nicht so tun als wäre der Chat neu):\n\n"
+                + prior_block
+            ),
+        })
+    msgs.append({
+        "role": "user",
+        "content": f"Aktuelle Frage des Nutzers: {user_message}",
+    })
+    instr = (
+        extra_instruction
+        or "Formuliere deine finale Antwort aus Tool-Ergebnissen und dem Chat-Verlauf "
+           "(Verlauf = was schon besprochen wurde; Tools = aktuelle Belege)."
+    )
+    msgs.append({
+        "role": "user",
+        "content": (
+            "Tool-Ergebnisse (Belegbasis für frische Fakten):\n\n"
             + _fmt_tool_results(tool_results)
-            + "\n\nFormuliere deine finale Antwort ausschließlich aus diesen Tool-Ergebnissen."
-        )},
-    ]
+            + "\n\n"
+            + instr
+        ),
+    })
+    return msgs
 
 
 def _call_llm(messages, extra_system=None, images=None):

@@ -206,6 +206,7 @@ def run_code(
     resume_token=None,
     allow_pending=None,
     images=None,
+    conversation_history=None,
 ):
     """
     CODE-Tool-Loop.
@@ -215,6 +216,7 @@ def run_code(
       allow_pending True  = freigegeben ausführen
       allow_pending False = abgelehnt, Modell informieren
     images: optionale OpenAI image_url-Parts (Vision / Screenshots)
+    conversation_history: optionale prior Turns für Multi-Turn-Nachfragen
     """
     def _emit(event):
         if on_event is None:
@@ -244,7 +246,22 @@ def run_code(
             max_rounds=max_rounds, on_event=on_event, _emit=_emit,
         )
 
-    history = [{"role": "user", "content": user_message}]
+    from . import history as chat_history
+
+    prior_history, history = chat_history.build_history_for_loop(
+        user_message, conversation_history
+    )
+    if prior_history:
+        try:
+            from . import log as _log
+            _log.log(
+                "code_history",
+                prior_msgs=len(prior_history),
+                prior_chars=sum(len(m["content"]) for m in prior_history),
+            )
+        except Exception:
+            pass
+
     system = (
         _CODE_ROLE
         + "\n\n"
@@ -252,12 +269,24 @@ def run_code(
         + "\n\nWICHTIG: Wenn du ein Werkzeug brauchst, antworte NUR mit JSON "
         '{"tool": Name, "args": {...}}. Kein Text drumherum. '
         "Wenn KEIN Werkzeug nötig ist, antworte normal auf Deutsch."
+        + (
+            "\nMulti-Turn: Chat-Verlauf liegt vor. Bei Nachfragen darauf aufbauen "
+            "(Dateipfade, Vereinbarungen, vorherige Schritte) — nicht von null starten."
+            if prior_history
+            else ""
+        )
     )
     tool_calls = []
     tool_results = []
     steps = []
     rounds = 0
     model_name = getattr(config, "CODE_OPENROUTER_MODEL", "deepseek/deepseek-v4-flash-0731")
+    if prior_history:
+        steps.append({
+            "step": "history",
+            "status": "success",
+            "detail": f"{len(prior_history)} prior msg(s)",
+        })
     if images:
         steps.append({"step": "Vision", "status": "success", "detail": f"{len(images)} Bild(er)"})
         _emit({

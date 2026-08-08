@@ -6,8 +6,9 @@ glyph-agent HTTP-Server — lokale Agenten- und Tool-Schicht als Dienst.
 Bietet POST /chat an, damit der Glyph-ACP-Adapter (oder ein anderes Frontend)
 die Tool-Orchestrierung nutzen kann, ohne die Agentenlogik selbst zu tragen.
 
-  POST /chat   { "message": "...", "confirm": null }
+  POST /chat   { "message": "...", "confirm": null, "history": [{role, content}, ...] }
                -> {"answer": str, "rounds": int, "tool_calls": [...], "ok": bool}
+  history: optional prior Turns (user/assistant) für Multi-Turn-Nachfragen.
 
   GET  /health -> {"status": "ok", "provider": "...", "model": "..."}
 
@@ -213,6 +214,10 @@ def _handle_chat(payload, send=None):
     message = (payload or {}).get("message", "")
     attachments = (payload or {}).get("attachments")
     images = _normalize_images((payload or {}).get("images"))
+    # Prior Turns: list of {role, content} — Multi-Turn-Nachfragen (ACP speichert sie).
+    conversation_history = (payload or {}).get("history")
+    if conversation_history is None:
+        conversation_history = (payload or {}).get("messages")
     # Textanhänge in die Nachricht einbetten (deutlich gekennzeichnet),
     # damit das Modell den Inhalt als Kontext bekommt.
     message = _embed_attachments(message, attachments)
@@ -242,11 +247,24 @@ def _handle_chat(payload, send=None):
             "Bei Modell-Fragen: nenne openai/gpt-5.6-luna, kein Wiki/Tool nötig."
         )
         try:
+            from core import history as chat_history
+            prior, _ = chat_history.build_history_for_loop(
+                message, conversation_history
+            )
+            user_text = message
+            if prior:
+                block = chat_history.format_prior_block(prior)
+                user_text = (
+                    "Bisheriger Chat-Verlauf:\n\n"
+                    + block
+                    + "\n\n---\nAktuelle Nachricht:\n"
+                    + message
+                )
             if images:
                 from core.providers.openrouter import user_content_with_images
-                user_payload = user_content_with_images(message, images)
+                user_payload = user_content_with_images(user_text, images)
             else:
-                user_payload = message
+                user_payload = user_text
             answer = _llm.chat(system, user_payload)
             res = {"ok": True, "answer": answer, "rounds": 1, "tool_calls": [], "chat_mode": "openrouter-chat"}
             if send:
@@ -286,6 +304,7 @@ def _handle_chat(payload, send=None):
             resume_token=resume_token,
             allow_pending=allow_pending,
             images=images,
+            conversation_history=conversation_history,
         )
         p = llm.get_provider()
         used_model = (
@@ -307,7 +326,13 @@ def _handle_chat(payload, send=None):
         return result
 
     # Agentenmodus: kontrollierter Tool-Loop mit Bestätigung für Schreib-Tools.
-    result = tool_loop.run(message, confirm=confirm, on_event=on_event, images=images)
+    result = tool_loop.run(
+        message,
+        confirm=confirm,
+        on_event=on_event,
+        images=images,
+        conversation_history=conversation_history,
+    )
     # Modell-Info anhängen (Primär Luna oder Free-Fallback).
     p = llm.get_provider()
     used_model = getattr(p, "_active_model", None) or p.model_name
