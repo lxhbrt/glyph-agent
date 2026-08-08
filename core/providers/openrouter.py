@@ -3,7 +3,7 @@
 OpenRouterProvider — Cloud-Modell über OpenRouter.
 
 Kette (B+):
-  1. Primär: openai/gpt-5.6-luna (AGENT_OPENROUTER_MODEL / OPENROUTER_MODEL)
+  1. Primär: deepseek/deepseek-v4-flash-0731 (AGENT_OPENROUTER_MODEL / OPENROUTER_MODEL)
   2. Free:   inclusionai/ling-3.0-flash:free bei Ausfall des Primärs
 
 Kein lokaler Chat-Fallback. Ohne API-Key: harter Fehler.
@@ -116,11 +116,13 @@ class OpenRouterProvider(ModelProvider):
     def __init__(self, url=None, model=None, api_key=None, fallback_model=None):
         self.url = url or os.environ.get("OPENROUTER_URL", "https://openrouter.ai/api/v1")
         self.api_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
-        default_model = os.environ.get("OPENROUTER_MODEL", "openai/gpt-5.6-luna")
+        default_model = os.environ.get("OPENROUTER_MODEL", "deepseek/deepseek-v4-flash-0731")
         if getattr(_cfg, "MODE", "agent") == "agent":
-            default_model = os.environ.get("AGENT_OPENROUTER_MODEL", "openai/gpt-5.6-luna")
+            default_model = os.environ.get(
+                "AGENT_OPENROUTER_MODEL", "deepseek/deepseek-v4-flash-0731"
+            )
         self.model = model or default_model
-        # Free-Fallback hinter dem Primärmodell (Luna → free).
+        # Free-Fallback hinter dem Primärmodell (Flash → free).
         if fallback_model is not None:
             self.fallback_model = fallback_model
         elif getattr(_cfg, "MODE", "agent") == "agent":

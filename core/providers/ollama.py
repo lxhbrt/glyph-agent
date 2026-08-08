@@ -29,11 +29,11 @@ class OllamaProvider(ModelProvider):
     def generate(self, prompt, temperature=0.3, num_ctx=8192):
         raise RuntimeError(
             "Lokaler Chat-Provider entfernt. Chat läuft nur über OpenRouter "
-            "(openai/gpt-5.6-luna → free)."
+            "(deepseek/deepseek-v4-flash-0731 → free)."
         )
 
     def chat(self, system, user, temperature=0.3, num_ctx=8192):
         raise RuntimeError(
             "Lokaler Chat-Provider entfernt. Chat läuft nur über OpenRouter "
-            "(openai/gpt-5.6-luna → free)."
+            "(deepseek/deepseek-v4-flash-0731 → free)."
         )

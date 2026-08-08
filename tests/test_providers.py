@@ -107,7 +107,11 @@ def main():
     os.environ["MODE"] = "openrouter-chat"
     p = load("openrouter")
     check("provider_name == 'openrouter'", p.provider_name == "openrouter", f"-> {p.provider_name}")
-    check("Primär-Modell Luna", "gpt-5.6-luna" in (p.model or ""), f"-> {getattr(p, 'model', p.model_name)}")
+    check(
+        "Primär-Modell DeepSeek Flash",
+        "deepseek-v4-flash" in (p.model or ""),
+        f"-> {getattr(p, 'model', p.model_name)}",
+    )
     try:
         p.chat("s", "u")
         check("Ohne Key blockiert", False, "<- hat NICHT geblockt!")
@@ -120,7 +124,7 @@ def main():
         "OPENROUTER_API_KEY": "test",
         "MODE": "agent",
         "AGENT_PRIMARY_PROVIDER": "fallback",
-        "AGENT_OPENROUTER_MODEL": "openai/gpt-5.6-luna",
+        "AGENT_OPENROUTER_MODEL": "deepseek/deepseek-v4-flash-0731",
         "AGENT_OPENROUTER_FALLBACK_MODEL": "inclusionai/ling-3.0-flash:free",
     })
     check("provider_name == 'fallback'", p.provider_name == "fallback", f"-> {p.provider_name}")

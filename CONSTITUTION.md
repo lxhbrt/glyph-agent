@@ -8,7 +8,7 @@ Kurze Spielregeln. Bei Widerspruch gilt **diese Datei** vor älteren README-Sät
 Nutzerfrage
   → lokales Gedächtnis (VaultFind: Embedding + Keyword)
   → Web nur bei Bedarf (Exa = grob, TinyFish = fein)
-  → Cloud-Denker OpenRouter: openai/gpt-5.6-luna
+  → Cloud-Denker OpenRouter: deepseek/deepseek-v4-flash-0731
        → bei Ausfall: inclusionai/ling-3.0-flash:free
   → Antwort + Trace (was lief, welches Modell)
 ```
@@ -16,13 +16,13 @@ Nutzerfrage
 | Rolle | Wer | Nicht |
 |-------|-----|--------|
 | **Gedächtnis / Suche** | lokal: bge-m3 + Keyword, Vault-Tools | Cloud-Embeddings |
-| **Denken / Antwort** | OpenRouter `openai/gpt-5.6-luna` → free | lokaler Chat |
+| **Denken / Antwort** | OpenRouter `deepseek/deepseek-v4-flash-0731` → free | lokaler Chat |
 | **UI / Build** | Glyph-UI: **Grok** = Build | Profile verwechseln |
 | **UI / Code** | Glyph-UI: **`^_Code`** = DeepSeek V4 Flash via OpenRouter + Workspace-Tools (ListDir/Read/Grep/SearchReplace/Write/Shell-Whitelist), Genehmigung in Glyph | Claude OAuth / Shell im Vault-Agent |
 | **UI / Vault** | Glyph-UI: **°_Agent** (id glyph-agent) = Vault/Wiki/Web/PDF/Mail + Cloud-Antwort (**kein Shell**) | Code-Schreiben außerhalb Vault |
 
 Ollama bleibt **nur** für lokale Embeddings (`bge-m3`), nicht als Antwort-KI.  
-**Kein** lokaler Chat-Fallback. Wenn Luna und Free scheitern: harter Fehler.
+**Kein** lokaler Chat-Fallback. Wenn Flash und Free scheitern: harter Fehler.
 
 ## Datenschutz (ohne LLM-Theater)
 
@@ -60,7 +60,7 @@ Bei Fragen wie „Welches Modell bist du?“ und Follow-ups („woher weißt du 
 | Quelle | Rolle |
 |--------|--------|
 | **Profil** `glyph-agent` + **aktuelles `used_model`** (Runtime) | **Fakten** für die Antwort |
-| Cloud-Denker (OpenRouter Luna → free) | **Formuliert freistil** — Ton, Länge, Stil dem Gespräch anpassen |
+| Cloud-Denker (OpenRouter DeepSeek V4 Flash → free) | **Formuliert freistil** — Ton, Länge, Stil dem Gespräch anpassen |
 | Tool-Ergebnisse, Wiki, Session-Archive | **Nein** — kein VaultFind, keine Quellenliste |
 
 **Nicht:** starres Template ablesen, „steht nicht im Tool-Ergebnis“, HSEQ-Müll-Quellen.  
@@ -70,7 +70,7 @@ Bei Fragen wie „Welches Modell bist du?“ und Follow-ups („woher weißt du 
 
 | Einstellung | Bedeutung |
 |-------------|-----------|
-| `AGENT_PRIMARY_PROVIDER=openrouter` (B+-Standard) | Luna → free bei Ausfall. **Kein** lokaler Chat. |
+| `AGENT_PRIMARY_PROVIDER=openrouter` (B+-Standard) | DeepSeek V4 Flash → free bei Ausfall. **Kein** lokaler Chat. |
 | `PROVIDER=fallback` | Alias derselben 2-Stufen-Cloud-Kette. |
 | `MODE=openrouter-chat` | Reiner Chat, **kein** Vault/Tools. |
 

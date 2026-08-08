@@ -2,7 +2,7 @@
 """
 FallbackProvider — 2-stufige Cloud-Kette (Agentenmodus).
 
-  1. bevorzugtes OpenRouter-Modell (Default: openai/gpt-5.6-luna)
+  1. bevorzugtes OpenRouter-Modell (Default: deepseek/deepseek-v4-flash-0731)
   2. kostenloses OpenRouter-Modell (Default: inclusionai/ling-3.0-flash:free)
 
 Kein lokaler Chat-Fallback. Wenn beide Cloud-Stufen scheitern: harter Fehler.

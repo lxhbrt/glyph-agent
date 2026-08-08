@@ -176,7 +176,7 @@ _ROLE = (
     "Du bist der glyph-agent (B+): Cloud-Denker mit lokalem Obsidian-Gedächtnis "
     "(HSEQ: Arbeitssicherheit, Umwelt, Qualität, Brandschutz).\n"
     "IDENTITÄT:\n"
-    "- Profil: glyph-agent. Cloud-Denker: openai/gpt-5.6-luna (OpenRouter), "
+    "- Profil: glyph-agent. Cloud-Denker: deepseek/deepseek-v4-flash-0731 (OpenRouter), "
     "Free-Fallback: inclusionai/ling-3.0-flash:free. Kein lokaler Chat.\n"
     "- Bei Modell-/Identitätsfragen und Follow-ups dazu: aus Runtime wissen "
     "(Profil + aktuelles Modell), FREI und natürlich formulieren — kein starres "
@@ -262,7 +262,9 @@ def _self_id_facts():
     try:
         p = llm.get_provider()
         pname = getattr(p, "provider_name", "openrouter")
-        primary = getattr(p, "model", None) or getattr(config, "AGENT_OPENROUTER_MODEL", "openai/gpt-5.6-luna")
+        primary = getattr(p, "model", None) or getattr(
+            config, "AGENT_OPENROUTER_MODEL", "deepseek/deepseek-v4-flash-0731"
+        )
         free = getattr(p, "fallback_model", None) or getattr(
             config, "AGENT_OPENROUTER_FALLBACK_MODEL", "inclusionai/ling-3.0-flash:free"
         )
@@ -270,7 +272,7 @@ def _self_id_facts():
         last = getattr(p, "last_used", None)
     except Exception:
         pname = "openrouter"
-        primary = getattr(config, "AGENT_OPENROUTER_MODEL", "openai/gpt-5.6-luna")
+        primary = getattr(config, "AGENT_OPENROUTER_MODEL", "deepseek/deepseek-v4-flash-0731")
         free = getattr(config, "AGENT_OPENROUTER_FALLBACK_MODEL", "inclusionai/ling-3.0-flash:free")
         active = primary
         last = None
@@ -410,7 +412,7 @@ def run(
         "- Wenn das Tool-Ergebnis etwas NICHT enthält (z.B. Fristen, Pflichten, "
         "Zahlen), sage ehrlich, dass es dort nicht steht — ohne erfundene Fakten.\n"
         "- AUSNAHME Identität/Modell/Meta: freistil aus Runtime (Profil glyph-agent, "
-        "Cloud-Denker openai/gpt-5.6-luna über OpenRouter, Free nur bei Ausfall). "
+        "Cloud-Denker deepseek/deepseek-v4-flash-0731 über OpenRouter, Free nur bei Ausfall). "
         "Kein Vault, kein 'steht nicht im Tool-Ergebnis', kein starres Template.\n"
         "- Chat-Verlauf (wenn vorhanden): Produktnamen, Modelle und getroffene "
         "Vergleiche daraus für Nachfragen nutzen — nicht so tun, als wüsstest du "
@@ -581,7 +583,7 @@ def run(
         rounds += 1
         messages_for_llm = [{"role": "system", "content": system}] + history
         _emit({"type": "step", "action": "OpenRouter", "status": "start",
-               "detail": "Cloud-Denker denkt (openai/gpt-5.6-luna → free)"})
+               "detail": "Cloud-Denker denkt (deepseek-v4-flash-0731 → free)"})
         reply = call_llm(messages_for_llm)
         _emit({"type": "answer", "status": "content", "text": reply})
 

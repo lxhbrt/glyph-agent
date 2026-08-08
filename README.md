@@ -9,7 +9,7 @@ Spielregeln: [`CONSTITUTION.md`](./CONSTITUTION.md).
 Nutzerfrage
   → VaultFind (Hybrid: 0.7 Embedding bge-m3 + 0.3 Keyword)   [lokal]
   → Web bei Bedarf: Exa = grob · TinyFish = fein              [API]
-  → OpenRouter openai/gpt-5.6-luna formuliert                [Cloud]
+  → OpenRouter deepseek/deepseek-v4-flash-0731 formuliert    [Cloud]
        → bei Ausfall: inclusionai/ling-3.0-flash:free
   → Antwort + Trace/Steps
 ```
@@ -20,7 +20,7 @@ Ollama läuft **nur** für **Embeddings** (`bge-m3`) — **kein** Chat.
 
 | MODE | Bedeutung | Standard |
 |------|-----------|----------|
-| `agent` | VaultFind + Tools + Cloud-Antwort (Luna → free) | Default |
+| `agent` | VaultFind + Tools + Cloud-Antwort (DeepSeek Flash → free) | Default |
 | `code` | `^_Code` — Workspace-Tools + DeepSeek (kein VaultFind) | per Request `mode: "code"` oder Env |
 | `openrouter-chat` | Reiner Chat — kein Wiki/Vault/Tools | — |
 
@@ -60,13 +60,13 @@ Shell-Whitelist u. a.: git status/diff/log/add/commit/stash (kein push), mkdir/t
 
 | `AGENT_PRIMARY_PROVIDER` | Verhalten |
 |--------------------------|-----------|
-| **`openrouter`** (B+-Default) | Luna → free bei Ausfall. Kein lokaler Chat. |
+| **`openrouter`** (B+-Default) | DeepSeek V4 Flash → free bei Ausfall. Kein lokaler Chat. |
 | `fallback` | Alias derselben 2-Stufen-Cloud-Kette. |
 
 ## Architektur-Prinzip
 
 ```
-Glyph (Browser) → glyph-agent HTTP (server.py:18899) → Tool-Loop → OpenRouter (Luna → free)
+Glyph (Browser) → glyph-agent HTTP (server.py:18899) → Tool-Loop → OpenRouter (Flash → free)
                                                               ↓
                                                   Vault (Obsidian) · Web (Exa/TinyFish)
 ```
@@ -97,14 +97,23 @@ Glyph (Browser) → glyph-agent HTTP (server.py:18899) → Tool-Loop → OpenRou
 ### Lokaler HTTP-Dienst (Hauptweg über Glyph)
 
 ```bash
-python3 server.py          # POST /chat, GET /health auf 127.0.0.1:18899
+python3 server.py          # /chat, /health, /models auf 127.0.0.1:18899
 curl http://127.0.0.1:18899/health
+curl http://127.0.0.1:18899/models
 curl -X POST http://127.0.0.1:18899/chat -H 'Content-Type: application/json' \
      -d '{"message": "Was steht im Vault zu Brandschutz?"}'
+# Hot-Apply OpenRouter Primary/Fallback (nächste Nachricht, ohne Restart):
+curl -X POST http://127.0.0.1:18899/models -H 'Content-Type: application/json' \
+     -d '{"shared":{"primary":"deepseek/deepseek-v4-flash-0731","fallback":"inclusionai/ling-3.0-tiny:free"}}'
+# Probe (eine ID testen):
+curl -X POST http://127.0.0.1:18899/models/probe -H 'Content-Type: application/json' \
+     -d '{"model":"inclusionai/ling-3.0-tiny:free"}'
 ```
 
 Antwort enthält `used_provider` / `used_model` (welches Modell geantwortet hat —
-Luna oder Free-Fallback). Ohne `confirm`-Liste werden Schreib-Tools abgelehnt.
+DeepSeek Flash oder Free-Fallback). Ohne `confirm`-Liste werden Schreib-Tools abgelehnt.
+
+SoT für UI-getriebene Models: Glyph **Anbindung** (`~/.glyph-ui/bindings.json`) → Bridge pushed an `POST /models`.
 
 ### Kommandozeile (CLI)
 
@@ -122,7 +131,8 @@ python3 -m scripts.cli web "TRGS 510 Aktuelle Anforderungen"
 ### Selbsttest
 
 ```bash
-python3 tests/test_providers.py   # Provider-Routen + Free-Fallback-Pfad
+python3 tests/test_providers.py        # Provider-Routen + Free-Fallback-Pfad
+python3 tests/test_runtime_models.py   # Hot-Apply / Snapshot
 ```
 
 ## Konfiguration
@@ -137,9 +147,9 @@ Alle Werte in `core/config.py` bzw. per Umgebungsvariable/`.env`.
 |----------|---------|-----------|
 | `MODE` | `agent` | `agent` \| `openrouter-chat` |
 | `AGENT_PRIMARY_PROVIDER` | `openrouter` | `openrouter` \| `fallback` (Alias) |
-| `AGENT_OPENROUTER_MODEL` | `openai/gpt-5.6-luna` | Primär-Cloud-Denker |
+| `AGENT_OPENROUTER_MODEL` | `deepseek/deepseek-v4-flash-0731` | Primär-Cloud-Denker |
 | `AGENT_OPENROUTER_FALLBACK_MODEL` | `inclusionai/ling-3.0-flash:free` | Free bei Ausfall |
-| `OPENROUTER_MODEL` | `openai/gpt-5.6-luna` | Modell im `openrouter-chat`-Modus |
+| `OPENROUTER_MODEL` | `deepseek/deepseek-v4-flash-0731` | Modell im `openrouter-chat`-Modus |
 | `OPENROUTER_FALLBACK_MODEL` | `inclusionai/ling-3.0-flash:free` | Free im Chat-Modus |
 | `EXTERNAL_MAX_CHARS` | `4000` | Kürzung vor Cloud-Übergabe |
 | `OPENROUTER_API_KEY` | — | Pflicht für Chat |
@@ -149,7 +159,7 @@ Alle Werte in `core/config.py` bzw. per Umgebungsvariable/`.env`.
 ```env
 MODE=agent
 AGENT_PRIMARY_PROVIDER=openrouter
-AGENT_OPENROUTER_MODEL=openai/gpt-5.6-luna
+AGENT_OPENROUTER_MODEL=deepseek/deepseek-v4-flash-0731
 AGENT_OPENROUTER_FALLBACK_MODEL=inclusionai/ling-3.0-flash:free
 OPENROUTER_API_KEY=sk-or-…
 ```
@@ -158,9 +168,10 @@ OPENROUTER_API_KEY=sk-or-…
 
 ```
 glyph-agent/
-├── server.py           # lokaler HTTP-Dienst (POST /chat, GET /health)
+├── server.py           # HTTP: /chat, /health, GET|POST /models, /models/probe
 ├── core/
 │   ├── config.py       # zentrale Konfiguration (+ CODE_*)
+│   ├── runtime_models.py  # Hot-Apply Primary/Fallback ohne Restart
 │   ├── llm.py          # Provider-Brücke
 │   ├── tool_loop.py    # Agenten-Loop (Vault)
 │   ├── code_loop.py    # CODE-Loop (^_Code)
@@ -172,7 +183,7 @@ glyph-agent/
 │   ├── agent.py
 │   ├── web.py          # + BrowseUrl
 │   └── providers/
-│       ├── openrouter.py # Luna → free
+│       ├── openrouter.py # DeepSeek Flash → free
 │       ├── fallback.py   # Alias derselben Kette
 │       └── factory.py
 ├── scripts/cli.py

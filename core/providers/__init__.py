@@ -36,4 +36,4 @@ class ModelProvider(ABC):
     @property
     @abstractmethod
     def model_name(self):
-        """Z. B. 'openai/gpt-5.6-luna' oder Kette 'luna → free'."""
+        """Z. B. 'deepseek/deepseek-v4-flash-0731' oder Kette 'flash → free'."""

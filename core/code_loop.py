@@ -79,9 +79,7 @@ def _call_code_llm(messages, temperature=0.2, images=None):
     provider = llm.get_provider()
     # Mit Bildern: Vision-Modell (Luna), sonst DeepSeek CODE
     if images:
-        primary = getattr(config, "CODE_VISION_MODEL", None) or getattr(
-            config, "AGENT_OPENROUTER_MODEL", "openai/gpt-5.6-luna"
-        )
+        primary = getattr(config, "CODE_VISION_MODEL", None) or "openai/gpt-5.6-luna"
         fallback = getattr(config, "AGENT_OPENROUTER_FALLBACK_MODEL", None)
     else:
         primary = getattr(config, "CODE_OPENROUTER_MODEL", "deepseek/deepseek-v4-flash-0731")
@@ -90,8 +88,8 @@ def _call_code_llm(messages, temperature=0.2, images=None):
     old_fb = getattr(provider, "fallback_model", None)
     try:
         provider.model = primary
-        if fallback:
-            provider.fallback_model = fallback
+        # Empty/None fallback = no secondary model (UI may clear free fallback)
+        provider.fallback_model = fallback if fallback else None
         # Flatten messages to system+user style when possible
         system_parts = []
         user_parts = []
@@ -135,10 +133,8 @@ def _call_code_llm(messages, temperature=0.2, images=None):
         )
         return text or ""
     finally:
-        if old_model is not None:
-            provider.model = old_model
-        if old_fb is not None:
-            provider.fallback_model = old_fb
+        provider.model = old_model
+        provider.fallback_model = old_fb
 
 
 def os_environ_int(name, default):

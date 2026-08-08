@@ -41,15 +41,17 @@ LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs"
 MODE = os.environ.get("MODE", "agent").lower()
 
 # --- Agentenmodus (MODE=agent) ---
-# B+-Default: openrouter = Luna → free bei Ausfall. "fallback" = Alias derselben Kette.
+# B+-Default: openrouter = DeepSeek V4 Flash → free bei Ausfall. "fallback" = Alias derselben Kette.
 AGENT_PRIMARY_PROVIDER = os.environ.get("AGENT_PRIMARY_PROVIDER", "openrouter")
-AGENT_OPENROUTER_MODEL = os.environ.get("AGENT_OPENROUTER_MODEL", "openai/gpt-5.6-luna")
+AGENT_OPENROUTER_MODEL = os.environ.get(
+    "AGENT_OPENROUTER_MODEL", "deepseek/deepseek-v4-flash-0731"
+)
 AGENT_OPENROUTER_FALLBACK_MODEL = os.environ.get(
     "AGENT_OPENROUTER_FALLBACK_MODEL", "inclusionai/ling-3.0-flash:free"
 )
 
 # --- OpenRouter-Chat-Modus (MODE=openrouter-chat) ---
-OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "openai/gpt-5.6-luna")
+OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "deepseek/deepseek-v4-flash-0731")
 OPENROUTER_FALLBACK_MODEL = os.environ.get(
     "OPENROUTER_FALLBACK_MODEL", "inclusionai/ling-3.0-flash:free"
 )
@@ -57,7 +59,7 @@ OPENROUTER_ALLOW_TOOLS = os.environ.get("OPENROUTER_ALLOW_TOOLS", "false").lower
 OPENROUTER_ALLOW_VAULT = os.environ.get("OPENROUTER_ALLOW_VAULT", "false").lower() == "true"
 
 # Provider-Auswahl:
-#   "openrouter" : B+-Standard — Luna → free
+#   "openrouter" : B+-Standard — DeepSeek V4 Flash → free
 #   "fallback"   : Alias — dieselbe 2-Stufen-Cloud-Kette (kein lokal)
 if MODE == "openrouter-chat":
     PROVIDER = "openrouter"
@@ -82,11 +84,8 @@ CODE_OPENROUTER_MODEL = os.environ.get(
 CODE_OPENROUTER_FALLBACK_MODEL = os.environ.get(
     "CODE_OPENROUTER_FALLBACK_MODEL", "deepseek/deepseek-v4-flash"
 )
-# Screenshots/Bilder: DeepSeek Flash hat oft keine Vision — dann Luna (oder Override).
-CODE_VISION_MODEL = os.environ.get(
-    "CODE_VISION_MODEL",
-    os.environ.get("AGENT_OPENROUTER_MODEL", "openai/gpt-5.6-luna"),
-)
+# Screenshots/Bilder: DeepSeek Flash hat oft keine Vision — Luna separat (oder Override).
+CODE_VISION_MODEL = os.environ.get("CODE_VISION_MODEL", "openai/gpt-5.6-luna")
 # Erlaubte Dateisystem-Roots (Komma-getrennt). Nur existierende Dirs nach expanduser.
 # Default: glyph-ui, glyph-agent, ~/.openclaw/workspace; optional ~/grok-chat-ui wenn vorhanden.
 _HOME = os.path.expanduser("~")

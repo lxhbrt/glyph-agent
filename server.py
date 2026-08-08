@@ -241,10 +241,10 @@ def _handle_chat(payload, send=None):
         from core import llm as _llm
         system = (
             "Du bist glyph-agent (reiner Chat-Modus). Cloud-Denker: "
-            "openai/gpt-5.6-luna über OpenRouter (Free-Fallback bei Ausfall). "
+            "deepseek/deepseek-v4-flash-0731 über OpenRouter (Free-Fallback bei Ausfall). "
             "Du hast KEINEN Zugriff auf Dateien, einen Vault, Tools oder das Internet. "
             "Antworte nur aus deinem eigenen Wissen. "
-            "Bei Modell-Fragen: nenne openai/gpt-5.6-luna, kein Wiki/Tool nötig."
+            "Bei Modell-Fragen: nenne deepseek/deepseek-v4-flash-0731, kein Wiki/Tool nötig."
         )
         try:
             from core import history as chat_history
@@ -349,14 +349,72 @@ def _handle_chat(payload, send=None):
 
 
 def _handle_health():
+    from core import runtime_models
+
     p = llm.get_provider()
+    snap = runtime_models.current_models_snapshot()
     return {
         "status": "ok",
         "provider": p.provider_name,
         "model": p.model_name,
-        "code_model": getattr(config, "CODE_OPENROUTER_MODEL", None),
+        "code_model": snap.get("code_model")
+        or getattr(config, "CODE_OPENROUTER_MODEL", None),
+        "code_fallback_model": snap.get("code_fallback_model"),
+        "primary_model": (snap.get("shared") or {}).get("primary"),
+        "fallback_model": (snap.get("shared") or {}).get("fallback"),
+        "models": snap,
         "modes": ["agent", "code", "openrouter-chat"],
     }
+
+
+def _read_json_body(handler):
+    length = int(handler.headers.get("Content-Length", 0) or 0)
+    raw = handler.rfile.read(length) if length else b"{}"
+    try:
+        return json.loads(raw.decode("utf-8") or "{}"), None
+    except json.JSONDecodeError:
+        return None, "Invalid JSON"
+
+
+def _handle_models_post(payload):
+    from core import runtime_models
+
+    snap = runtime_models.apply_models(payload or {})
+    return {"ok": True, "models": snap, **_handle_health()}
+
+
+def _handle_models_probe(payload):
+    from core import runtime_models
+
+    body = payload or {}
+    model = body.get("model") or body.get("primary") or ""
+    timeout = body.get("timeout")
+    try:
+        timeout_i = int(timeout) if timeout is not None else 45
+    except (TypeError, ValueError):
+        timeout_i = 45
+    result = runtime_models.probe_model(str(model), timeout=timeout_i)
+    # Attach context_length hint from OpenRouter public catalog when possible
+    try:
+        import urllib.request
+
+        mid = str(model).strip()
+        req = urllib.request.Request(
+            f"{getattr(config, 'OPENROUTER_URL', 'https://openrouter.ai/api/v1').rstrip('/')}/models",
+            headers={"Accept": "application/json"},
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        for m in data.get("data") or []:
+            if str(m.get("id") or "") == mid:
+                cl = m.get("context_length")
+                if cl:
+                    result["context_length"] = int(cl)
+                break
+    except Exception:
+        pass
+    return result
 
 
 def main():
@@ -377,19 +435,50 @@ def main():
             self.wfile.write(body)
 
         def do_GET(self):
-            if self.path == "/health" or self.path.startswith("/health"):
+            path = self.path.split("?", 1)[0]
+            if path == "/health" or path.startswith("/health"):
                 self._send(200, _handle_health())
+            elif path in ("/models", "/models/"):
+                # Snapshot only (same shape as /health["models"]); mutate via POST.
+                try:
+                    from core import runtime_models
+
+                    self._send(200, {"ok": True, "models": runtime_models.current_models_snapshot()})
+                except Exception as e:
+                    self._send(500, {"ok": False, "error": str(e)})
             else:
                 self._send(404, {"error": "Not found"})
 
         def do_POST(self):
-            if self.path == "/chat" or self.path.startswith("/chat"):
-                length = int(self.headers.get("Content-Length", 0) or 0)
-                raw = self.rfile.read(length) if length else b"{}"
+            path = self.path.split("?", 1)[0]
+            if path in ("/models", "/models/"):
+                payload, err = _read_json_body(self)
+                if err:
+                    self._send(400, {"error": err, "ok": False})
+                    return
                 try:
-                    payload = json.loads(raw.decode("utf-8") or "{}")
-                except json.JSONDecodeError:
-                    self._send(400, {"error": "Invalid JSON"})
+                    self._send(200, _handle_models_post(payload))
+                except ValueError as e:
+                    self._send(400, {"error": str(e), "ok": False})
+                except Exception as e:
+                    self._send(500, {"error": str(e), "ok": False})
+                return
+            if path in ("/models/probe", "/models/probe/", "/models/test", "/models/test/"):
+                payload, err = _read_json_body(self)
+                if err:
+                    self._send(400, {"error": err, "ok": False})
+                    return
+                try:
+                    self._send(200, _handle_models_probe(payload))
+                except ValueError as e:
+                    self._send(400, {"error": str(e), "ok": False})
+                except Exception as e:
+                    self._send(500, {"error": str(e), "ok": False})
+                return
+            if path == "/chat" or path.startswith("/chat"):
+                payload, err = _read_json_body(self)
+                if err:
+                    self._send(400, {"error": err})
                     return
                 try:
                     # Streaming-Modus (NDJSON): Client sendet explizit den Header —
@@ -449,7 +538,7 @@ def main():
         f"  Timeout: CHAT={getattr(config, 'CHAT_TIMEOUT', 60)}s "
         f"CODE={getattr(config, 'CODE_CHAT_TIMEOUT', 60)}s · threaded"
     )
-    print("  POST /chat  |  GET /health")
+    print("  POST /chat  |  GET /health  |  GET|POST /models  |  POST /models/probe")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
