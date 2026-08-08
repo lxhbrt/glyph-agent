@@ -88,16 +88,124 @@ def _is_blocked(relpath):
 
 # --- Lesen / Suchen ---
 
+# Stopwörter für Token-Suche (DE/EN-Rauschen). Datum/Zahlen werden nie gefiltert.
+_SEARCH_STOP = frozenset({
+    "die", "der", "das", "den", "dem", "des", "ein", "eine", "einer", "eines",
+    "einen", "einem", "und", "oder", "im", "in", "am", "an", "auf", "bei",
+    "mit", "von", "vom", "zu", "zum", "zur", "für", "fur", "ist", "sind",
+    "war", "wie", "was", "welche", "welcher", "welches", "wo", "wer", "mir",
+    "mein", "meine", "meinen", "meinem", "dir", "dein", "ich", "du", "wir",
+    "uns", "auch", "noch", "nur", "nicht", "kein", "keine", "sich", "als",
+    "aus", "nach", "über", "uber", "unter", "sollten", "sollte", "liegen",
+    "liegt", "gibt", "habe", "hast", "hat", "haben", "sein", "seine", "ihrer",
+    "ihren", "bitte", "mal", "etwa", "zb", "b", "z", "ob", "es", "dass",
+    "daß", "hier", "dort", "diese", "dieser", "dieses", "doch", "schon",
+    "ganz", "sehr", "mehr", "weniger", "alle", "alles", "jeder", "jede",
+    "obsidian", "ordner", "sync", "dokkumente", "dokumente", "dateien",
+    "datei", "notizen", "notiz", "rohnotizen", "weitere", "the", "a", "an",
+    "of", "to", "for", "and", "or", "is", "are", "in", "on", "at", "by",
+})
+
+
+def _tokenize_query(query):
+    """
+    Zerlegt eine Nutzerfrage in Such-Tokens.
+    Behält Daten/Zahlen (z. B. 2026-06-29); filtert Stopwörter und Minilänge.
+    """
+    raw = re.findall(r"[a-zA-Z0-9äöüÄÖÜß_\-./]+", (query or "").lower())
+    tokens = []
+    seen = set()
+    for t in raw:
+        t = t.strip("./-")
+        if not t or t in seen:
+            continue
+        if any(c.isdigit() for c in t):
+            tokens.append(t)
+            seen.add(t)
+            continue
+        if len(t) < 3 or t in _SEARCH_STOP:
+            continue
+        tokens.append(t)
+        seen.add(t)
+    return tokens
+
+
+def _is_archive_source_path(rel_path):
+    """
+    True bei OpenClaw-Wiki-Source-Kopien / Hash-Slug-Archiven — nicht die
+    kanonischen Arbeitsdateien (z. B. HSEQ Sync Eingang/Fertig).
+    """
+    p = (rel_path or "").replace("\\", "/").lower().lstrip("/")
+    if p.startswith("sources/") or "/sources/" in f"/{p}":
+        return True
+    if "unsafe-local" in p:
+        return True
+    # Hash-Slugs: …-70dc75d2-… oder …-d1978aae.md
+    if re.search(r"-[0-9a-f]{8,}(?:-|\.md$)", p):
+        return True
+    return False
+
+
+def _vault_priority_index(vault_name, vault_roots=None):
+    """0 = primärer Vault (VAULT_PATHS[0]), höher = später / unbekannter."""
+    roots = vault_roots or getattr(config, "VAULT_PATHS", [config.VAULT_PATH])
+    name = (vault_name or "").strip()
+    for i, v in enumerate(roots):
+        if os.path.basename(os.path.realpath(v)) == name:
+            return i
+    return len(list(roots)) + 1
+
+
+def path_source_rank(rel_path, vault_name=None, query=None):
+    """
+    Zusätzlicher Score für kanonische Arbeitsdateien vs. Archiv-Kopien.
+
+    Ziel: Nutzer trifft gültige Live-Dateien (HSEQ Sync, Arbeitsfluss), nicht
+    alte Wiki-Source-Nummern/Hash-Slugs aus OpenClaw memory-wiki/sources/.
+    Positiv = bevorzugen, negativ = abwerten.
+    """
+    rel = (rel_path or "").replace("\\", "/").lstrip("/")
+    rel_l = rel.lower()
+    bonus = 0
+    # Primär-Vault vor Neben-Vaults (Wiki, Archiv)
+    pri = _vault_priority_index(vault_name)
+    bonus += max(0, 24 - pri * 10)
+    if _is_archive_source_path(rel):
+        bonus -= 50
+    # Arbeitsfluss-Roh-/Fertig-Notizen: kanonisch
+    if "00 arbeitsfluss/eingang" in rel_l or "00 arbeitsfluss/fertig" in rel_l:
+        bonus += 18
+    q = (query or "").lower()
+    if q:
+        if "eingang" in q and "eingang" in rel_l:
+            bonus += 12
+        if "fertig" in q and "fertig" in rel_l:
+            bonus += 12
+    return bonus
+
+
 def search_vault(query, limit=20):
     """
-    Durchsucht alle .md-Dateien im Vault nach einer Textzeichenkette (case-insensitive).
-    Liefert Liste von {'path': relpath, 'hits': n}. Reine Leseoperation.
+    Durchsucht alle .md-Dateien im Vault (case-insensitive).
+
+    Scoring (Hybrid Keyword):
+      - Token-Treffer im Dateinamen/Pfad (stark gewichtet, Body-Cap)
+      - Token-Treffer im Inhalt (gecappt — lange Wiki-Kopien nicht überstimmen)
+      - Vault-Priorität + Abwertung von sources/unsafe-local-Hash-Archiven
+      - optional exakter Phrasen-Treffer im Inhalt (falls Query kurz)
+
+    Liefert Liste von {'path', 'abs_path', 'vault', 'hits'}. Reine Leseoperation.
     """
+    query = (query or "").strip()
+    if not query:
+        return []
     query_l = query.lower()
+    tokens = _tokenize_query(query)
     results = []
     vault_roots = getattr(config, "VAULT_PATHS", [config.VAULT_PATH])
-    for vroot in vault_roots:
+    for vault_i, vroot in enumerate(vault_roots):
         vroot_r = os.path.realpath(vroot)
+        vault_name = os.path.basename(vroot_r)
         for root, _dirs, files in os.walk(vroot_r):
             # Obsidian-interne Ordner + Backups ausschließen
             relroot = os.path.relpath(root, vroot_r)
@@ -116,13 +224,216 @@ def search_vault(query, limit=20):
                         content = f.read()
                 except OSError:
                     continue
-                hits = content.lower().count(query_l)
-                if hits:
-                    rel = os.path.relpath(fpath, vroot_r)
-                    results.append({"path": rel, "abs_path": fpath, "vault": os.path.basename(vroot_r), "hits": hits})
+                content_l = content.lower()
+                fn_l = fn.lower()
+                rel = os.path.relpath(fpath, vroot_r)
+                rel_l = rel.lower().replace("\\", "/")
+                score = 0
+                # Exakte Phrase (nur sinnvoll bei kurzen Queries, z. B. Fachbegriff)
+                if len(query_l) <= 64 and " " not in query_l.strip():
+                    # Body-Cap: lange Archiv-Kopien sollen reine Datums-Queries nicht dominieren
+                    score += min(content_l.count(query_l), 4) * 3
+                    if query_l in fn_l or query_l in rel_l:
+                        score += 12
+                if tokens:
+                    for tok in tokens:
+                        name_hit = tok in fn_l or tok in rel_l
+                        c = content_l.count(tok)
+                        if name_hit:
+                            # Dateiname/Pfad: stark; Body nur leicht (Cap)
+                            score += 12 + min(c, 3)
+                        elif c:
+                            score += min(c, 6)
+                else:
+                    # Keine Tokens (nur Stopwörter): alter Phrasen-Modus
+                    score += min(content_l.count(query_l), 8)
+                if not score:
+                    continue
+                score += path_source_rank(rel, vault_name=vault_name, query=query)
+                # feiner Tie-Breaker: früherer Vault bei Gleichstand
+                score += max(0, 3 - vault_i) * 0.01
+                if score > 0:
+                    results.append({
+                        "path": rel,
+                        "abs_path": fpath,
+                        "vault": vault_name,
+                        "hits": score,
+                    })
     results.sort(key=lambda r: r["hits"], reverse=True)
-    log.log("search_vault", query=query, results=len(results))
+    log.log("search_vault", query=query, results=len(results), tokens=tokens[:12])
     return results[:limit]
+
+
+def list_vault_dir(path="", limit=200, extensions=None):
+    """
+    Listet Dateien und Unterordner unter einem Vault-Pfad (nur Lesen).
+
+    path: relativ zu einem Vault-Root, optional mit Vault-Präfix
+          (z. B. "HSEQ Sync/00 Arbeitsfluss/Eingang" oder "00 Arbeitsfluss/Eingang").
+          Leer / "." = Top-Level aller konfigurierten Vaults.
+    extensions: optional Iterable wie [".md", ".pdf"]; None = alle Dateien
+                (außer versteckten/.obsidian/backups).
+    limit: max. Einträge (Default 200).
+
+    Liefert {
+      status, path, vault, entries: [{name, path, type, size?, mtime?}],
+      count, truncated, error?
+    }.
+    """
+    limit = max(1, min(int(limit or 200), 1000))
+    ext_set = None
+    if extensions:
+        ext_set = {e.lower() if e.startswith(".") else f".{e.lower()}" for e in extensions}
+
+    raw = (path or "").strip()
+    if raw in ("", ".", "/"):
+        # Top-Level: je Vault-Root die direkten Kinder
+        entries = []
+        for vroot in getattr(config, "VAULT_PATHS", [config.VAULT_PATH]):
+            vroot_r = os.path.realpath(vroot)
+            if not os.path.isdir(vroot_r):
+                continue
+            vname = os.path.basename(vroot_r)
+            try:
+                names = sorted(os.listdir(vroot_r), key=lambda s: s.lower())
+            except OSError:
+                continue
+            for name in names:
+                if name.startswith("."):
+                    continue
+                if name.lower() == "backups":
+                    continue
+                full = os.path.join(vroot_r, name)
+                rel_prefixed = f"{vname}/{name}"
+                if _is_blocked(rel_prefixed):
+                    continue
+                is_dir = os.path.isdir(full)
+                if not is_dir and ext_set is not None:
+                    _, e = os.path.splitext(name)
+                    if e.lower() not in ext_set:
+                        continue
+                entry = {
+                    "name": name,
+                    "path": rel_prefixed,
+                    "type": "dir" if is_dir else "file",
+                    "vault": vname,
+                }
+                if not is_dir:
+                    try:
+                        st = os.stat(full)
+                        entry["size"] = st.st_size
+                        entry["mtime"] = int(st.st_mtime)
+                    except OSError:
+                        pass
+                entries.append(entry)
+                if len(entries) >= limit:
+                    break
+            if len(entries) >= limit:
+                break
+        log.log("list_vault_dir", path=".", count=len(entries))
+        return {
+            "status": "success",
+            "path": ".",
+            "vault": None,
+            "entries": entries[:limit],
+            "count": min(len(entries), limit),
+            "truncated": len(entries) > limit,
+            "error": None,
+        }
+
+    resolved = _resolve_vault_path(raw)
+    if not resolved:
+        log.log("list_vault_dir_denied", path=raw, reason="outside_or_invalid")
+        return {
+            "status": "error",
+            "path": raw,
+            "vault": None,
+            "entries": [],
+            "count": 0,
+            "truncated": False,
+            "error": f"Pfad außerhalb der Vaults oder ungültig: {raw}",
+        }
+    rel = _rel_to_root(resolved)
+    if _is_blocked(rel):
+        return {
+            "status": "error",
+            "path": rel,
+            "vault": None,
+            "entries": [],
+            "count": 0,
+            "truncated": False,
+            "error": f"Geschützter Ordner — Zugriff verweigert: {rel}",
+        }
+    if not os.path.isdir(resolved):
+        return {
+            "status": "error",
+            "path": rel,
+            "vault": os.path.basename(_root_for_path(resolved) or ""),
+            "entries": [],
+            "count": 0,
+            "truncated": False,
+            "error": f"Kein Verzeichnis: {rel}",
+        }
+
+    vroot = _root_for_path(resolved)
+    vname = os.path.basename(vroot) if vroot else ""
+    entries = []
+    try:
+        names = sorted(os.listdir(resolved), key=lambda s: s.lower())
+    except OSError as e:
+        return {
+            "status": "error",
+            "path": rel,
+            "vault": vname,
+            "entries": [],
+            "count": 0,
+            "truncated": False,
+            "error": str(e),
+        }
+
+    for name in names:
+        if name.startswith("."):
+            continue
+        if name.lower() == "backups":
+            continue
+        full = os.path.join(resolved, name)
+        child_rel = os.path.join(rel, name).replace("\\", "/")
+        # blocked check auf Kind relativ zum Vault-Präfix
+        if _is_blocked(child_rel):
+            continue
+        is_dir = os.path.isdir(full)
+        if not is_dir and ext_set is not None:
+            _, e = os.path.splitext(name)
+            if e.lower() not in ext_set:
+                continue
+        entry = {
+            "name": name,
+            "path": child_rel,
+            "type": "dir" if is_dir else "file",
+            "vault": vname,
+        }
+        if not is_dir:
+            try:
+                st = os.stat(full)
+                entry["size"] = st.st_size
+                entry["mtime"] = int(st.st_mtime)
+            except OSError:
+                pass
+        entries.append(entry)
+        if len(entries) >= limit:
+            break
+
+    truncated = len(entries) >= limit and len(names) > limit
+    log.log("list_vault_dir", path=rel, count=len(entries), truncated=truncated)
+    return {
+        "status": "success",
+        "path": rel,
+        "vault": vname,
+        "entries": entries,
+        "count": len(entries),
+        "truncated": truncated,
+        "error": None,
+    }
 
 
 def read_note(path):
@@ -264,6 +575,101 @@ def list_backups():
         if fn.endswith(".md"):
             out.append(fn)
     return out
+
+
+# --- OpenClaw Wiki-Status (agent-digest, read-only) ---------------------------
+
+def _wiki_digest_path():
+    """Pfad zu agent-digest.json unter OpenClaw memory-wiki, oder None."""
+    vault_roots = getattr(config, "VAULT_PATHS", [config.VAULT_PATH])
+    for v in vault_roots:
+        # Konvention: OpenClaw memory-wiki/.openclaw-wiki/cache/agent-digest.json
+        cand = os.path.join(
+            v, ".openclaw-wiki", "cache", "agent-digest.json"
+        )
+        if os.path.isfile(cand):
+            return cand
+        # Basename-Match falls Vault-Root anders heißt
+        if "memory-wiki" in os.path.basename(os.path.realpath(v)).lower() or \
+           "openclaw" in os.path.basename(os.path.realpath(v)).lower():
+            cand2 = os.path.join(
+                os.path.realpath(v), ".openclaw-wiki", "cache", "agent-digest.json"
+            )
+            if os.path.isfile(cand2):
+                return cand2
+    # Fallback: bekannter Default-Pfad
+    home = os.path.expanduser("~")
+    fallback = os.path.join(
+        home, "ObsidianVaults", "OpenClaw memory-wiki",
+        ".openclaw-wiki", "cache", "agent-digest.json",
+    )
+    if os.path.isfile(fallback):
+        return fallback
+    return None
+
+
+def wiki_status():
+    """
+    Read-only Stats aus OpenClaw agent-digest.json.
+    Liefert pageCounts, claimCount, claimHealth (gekürzt), page_sample_n.
+    """
+    path = _wiki_digest_path()
+    if not path:
+        log.log("wiki_status_missing")
+        return {
+            "ok": False,
+            "available": False,
+            "error": (
+                "agent-digest.json nicht gefunden "
+                "(erwartet unter OpenClaw memory-wiki/.openclaw-wiki/cache/)."
+            ),
+        }
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        return {"ok": False, "available": False, "error": f"digest unlesbar: {e}"}
+
+    pages = data.get("pages") or []
+    # Keine vollen pages — nur Stats + kurze Stichprobe
+    sample = []
+    for p in pages[:8]:
+        if not isinstance(p, dict):
+            continue
+        sample.append({
+            "id": p.get("id"),
+            "title": p.get("title"),
+            "kind": p.get("kind") or p.get("pageType"),
+            "path": p.get("path"),
+        })
+    claim_health = data.get("claimHealth") or {}
+    # claimHealth kann verschachtelt sein — flach halten
+    health_summary = {}
+    if isinstance(claim_health, dict):
+        for k, v in list(claim_health.items())[:12]:
+            if isinstance(v, (int, float, str, bool)) or v is None:
+                health_summary[k] = v
+            elif isinstance(v, list):
+                health_summary[k] = f"{len(v)} Einträge"
+            elif isinstance(v, dict):
+                health_summary[k] = {sk: sv for sk, sv in list(v.items())[:8]
+                                     if isinstance(sv, (int, float, str, bool, type(None)))}
+            else:
+                health_summary[k] = str(type(v).__name__)
+
+    log.log("wiki_status", path=path, pages=len(pages))
+    return {
+        "ok": True,
+        "available": True,
+        "digest_path": path,
+        "pageCounts": data.get("pageCounts") or {},
+        "claimCount": data.get("claimCount"),
+        "claimHealth": health_summary,
+        "contradictionClusters": len(data.get("contradictionClusters") or []),
+        "pages_total": len(pages),
+        "page_sample": sample,
+        "error": None,
+    }
 
 
 # --- Optional: Obsidian CLI (kepano) unter Sicherheitsdach --------------------

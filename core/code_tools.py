@@ -21,20 +21,36 @@ from . import config, log
 _MAX_READ_BYTES = 512 * 1024
 _MAX_WRITE_BYTES = 1024 * 1024
 _MAX_LIST_ENTRIES = 200
+_MAX_LIST_RECURSIVE = 400
+_MAX_LIST_DEPTH = 2
 _MAX_CMD_OUTPUT = 80_000
+_MAX_GREP_HITS = 50
+_MAX_GREP_FILE_BYTES = 512 * 1024
+_SKIP_DIR_NAMES = {
+    ".git", "node_modules", "__pycache__", ".venv", "venv",
+    "dist", "build", ".tox", ".mypy_cache", ".pytest_cache",
+}
 
 
 def workspace_roots():
-    """Kanonische erlaubte Roots (realpath)."""
+    """Kanonische erlaubte Roots (realpath) — nur existierende Dirs."""
     roots = []
+    seen = set()
     for r in getattr(config, "CODE_WORKSPACE_ROOTS", []) or []:
         r = (r or "").strip()
         if not r:
             continue
         try:
-            roots.append(os.path.realpath(r))
+            expanded = os.path.expanduser(r)
+            if not os.path.isdir(expanded):
+                continue
+            real = os.path.realpath(expanded)
         except OSError:
             continue
+        if real in seen:
+            continue
+        seen.add(real)
+        roots.append(real)
     return roots
 
 
@@ -74,55 +90,337 @@ def _rel_display(abs_path, root):
         return abs_path
 
 
-def list_dir(path="."):
-    """Listet Verzeichnis unter Workspace-Root (nicht rekursiv)."""
+def list_dir(path=".", recursive=False, max_depth=None):
+    """Listet Verzeichnis unter Workspace-Root.
+
+    recursive=True: max. Tiefe 2 (cap), mit Gesamteinträge-Cap.
+    """
     abs_path, root = _resolve_path(path or ".")
     if not abs_path:
         raise ValueError(f"Pfad außerhalb der Workspace-Roots: {path}")
     if not os.path.isdir(abs_path):
         raise ValueError(f"Kein Verzeichnis: {path}")
-    entries = []
-    try:
-        names = sorted(os.listdir(abs_path))
-    except OSError as e:
-        raise ValueError(str(e)) from e
-    for name in names[:_MAX_LIST_ENTRIES]:
-        full = os.path.join(abs_path, name)
-        kind = "dir" if os.path.isdir(full) else "file"
+
+    want_rec = bool(recursive)
+    depth_cap = _MAX_LIST_DEPTH
+    if max_depth is not None:
         try:
-            size = os.path.getsize(full) if kind == "file" else None
-        except OSError:
-            size = None
-        entries.append({"name": name, "kind": kind, "size": size})
-    log.log("code_list_dir", path=_rel_display(abs_path, root), n=len(entries))
+            depth_cap = max(0, min(int(max_depth), _MAX_LIST_DEPTH))
+        except (TypeError, ValueError):
+            depth_cap = _MAX_LIST_DEPTH
+
+    entries = []
+    truncated = False
+
+    if not want_rec:
+        try:
+            names = sorted(os.listdir(abs_path))
+        except OSError as e:
+            raise ValueError(str(e)) from e
+        for name in names[:_MAX_LIST_ENTRIES]:
+            full = os.path.join(abs_path, name)
+            kind = "dir" if os.path.isdir(full) else "file"
+            try:
+                size = os.path.getsize(full) if kind == "file" else None
+            except OSError:
+                size = None
+            entries.append({"name": name, "kind": kind, "size": size})
+        truncated = len(names) > _MAX_LIST_ENTRIES
+    else:
+        # Rekursiv mit Depth- und Entry-Cap
+        def _walk(cur, depth):
+            nonlocal truncated
+            try:
+                names = sorted(os.listdir(cur))
+            except OSError:
+                return
+            for name in names:
+                if len(entries) >= _MAX_LIST_RECURSIVE:
+                    truncated = True
+                    return
+                if name in _SKIP_DIR_NAMES or name.startswith("."):
+                    # .git etc. überspringen; versteckte nur flach erlauben wenn nicht skip
+                    if name in _SKIP_DIR_NAMES:
+                        continue
+                full = os.path.join(cur, name)
+                rel = os.path.relpath(full, abs_path)
+                kind = "dir" if os.path.isdir(full) else "file"
+                try:
+                    size = os.path.getsize(full) if kind == "file" else None
+                except OSError:
+                    size = None
+                entries.append({"name": rel.replace(os.sep, "/"), "kind": kind, "size": size})
+                if kind == "dir" and depth < depth_cap and name not in _SKIP_DIR_NAMES:
+                    _walk(full, depth + 1)
+                if truncated:
+                    return
+
+        _walk(abs_path, 0)
+
+    log.log(
+        "code_list_dir",
+        path=_rel_display(abs_path, root),
+        n=len(entries),
+        recursive=want_rec,
+    )
     return {
         "path": _rel_display(abs_path, root),
         "root": root,
         "entries": entries,
-        "truncated": len(names) > _MAX_LIST_ENTRIES,
+        "truncated": truncated,
+        "recursive": want_rec,
+        "max_depth": depth_cap if want_rec else 0,
     }
 
 
-def read_file(path, max_bytes=None):
-    """Liest Textdatei (UTF-8, replacement) innerhalb der Roots."""
+def read_file(path, max_bytes=None, offset=None, limit=None):
+    """Liest Textdatei (UTF-8, replacement) innerhalb der Roots.
+
+    offset/limit: optional Zeilen (1-basiert offset; limit = max. Zeilen).
+    """
     abs_path, root = _resolve_path(path)
     if not abs_path:
         raise ValueError(f"Pfad außerhalb der Workspace-Roots: {path}")
     if not os.path.isfile(abs_path):
         raise ValueError(f"Datei nicht gefunden: {path}")
-    limit = int(max_bytes or _MAX_READ_BYTES)
+    byte_limit = int(max_bytes or _MAX_READ_BYTES)
     with open(abs_path, "rb") as f:
-        data = f.read(limit + 1)
-    truncated = len(data) > limit
-    data = data[:limit]
+        data = f.read(byte_limit + 1)
+    truncated = len(data) > byte_limit
+    data = data[:byte_limit]
     text = data.decode("utf-8", errors="replace")
-    log.log("code_read_file", path=_rel_display(abs_path, root), chars=len(text))
-    return {
+
+    line_offset = None
+    line_limit = None
+    total_lines = None
+    if offset is not None or limit is not None:
+        lines = text.splitlines(keepends=True)
+        total_lines = len(lines)
+        try:
+            # 1-basiert; offset=1 = erste Zeile; offset=0/None = ab Anfang
+            start = int(offset) if offset is not None else 1
+        except (TypeError, ValueError):
+            start = 1
+        if start < 1:
+            start = 1
+        try:
+            n = int(limit) if limit is not None else None
+        except (TypeError, ValueError):
+            n = None
+        line_offset = start
+        line_limit = n
+        idx0 = start - 1
+        if n is None:
+            slice_lines = lines[idx0:]
+        else:
+            slice_lines = lines[idx0 : idx0 + max(0, n)]
+        text = "".join(slice_lines)
+        # Zeilen-Fenster: truncated wenn nicht alle Zeilen oder Byte-Cap
+        if idx0 + len(slice_lines) < total_lines:
+            truncated = True
+
+    log.log(
+        "code_read_file",
+        path=_rel_display(abs_path, root),
+        chars=len(text),
+        offset=line_offset,
+        limit=line_limit,
+    )
+    out = {
         "path": _rel_display(abs_path, root),
         "content": text,
         "chars": len(text),
         "truncated": truncated,
     }
+    if line_offset is not None:
+        out["offset"] = line_offset
+        out["limit"] = line_limit
+        out["total_lines"] = total_lines
+    return out
+
+
+def grep(pattern, path=".", max_hits=None, case_insensitive=False):
+    """
+    Sucht pattern in Dateien unter path (nur Workspace-Roots).
+    Nutzt `rg` wenn im PATH, sonst Python-Walk. Max. Treffer capped.
+    """
+    if not pattern or not str(pattern).strip():
+        raise ValueError("grep: pattern fehlt")
+    pattern = str(pattern)
+    abs_path, root = _resolve_path(path or ".")
+    if not abs_path:
+        raise ValueError(f"Pfad außerhalb der Workspace-Roots: {path}")
+    if not os.path.exists(abs_path):
+        raise ValueError(f"Pfad nicht gefunden: {path}")
+
+    cap = int(max_hits or _MAX_GREP_HITS)
+    cap = max(1, min(cap, 200))
+    ci = bool(case_insensitive)
+
+    hits = []
+    engine = "python"
+    # --- try ripgrep ---
+    import shutil
+    rg = shutil.which("rg")
+    if rg:
+        engine = "rg"
+        argv = [rg, "--line-number", "--no-heading", "--color", "never",
+                "--max-count", str(cap)]
+        if ci:
+            argv.append("-i")
+        # Skip heavy dirs
+        for d in _SKIP_DIR_NAMES:
+            argv.extend(["--glob", f"!{d}/**"])
+        argv.extend(["--", pattern, abs_path])
+        try:
+            proc = subprocess.run(
+                argv, capture_output=True, text=True, timeout=30, check=False,
+            )
+            # rg exit 1 = no matches; 0 = matches; 2 = error
+            if proc.returncode not in (0, 1):
+                engine = "python"  # fallback
+            else:
+                for line in (proc.stdout or "").splitlines():
+                    if len(hits) >= cap:
+                        break
+                    # format: path:lineno:text
+                    if ":" not in line:
+                        continue
+                    # split max 2 times from left for path that may contain :
+                    # rg uses path:line:content
+                    m = re.match(r"^(.*?):(\d+):(.*)$", line)
+                    if not m:
+                        continue
+                    fpath, lineno, content = m.group(1), int(m.group(2)), m.group(3)
+                    try:
+                        rel = os.path.relpath(fpath, root)
+                    except ValueError:
+                        rel = fpath
+                    hits.append({
+                        "path": rel.replace(os.sep, "/"),
+                        "line": lineno,
+                        "text": content[:500],
+                    })
+        except (subprocess.TimeoutExpired, OSError, FileNotFoundError):
+            engine = "python"
+            hits = []
+
+    if engine == "python":
+        hits = []
+        flags = re.IGNORECASE if ci else 0
+        try:
+            cre = re.compile(pattern, flags)
+        except re.error as e:
+            raise ValueError(f"Ungültiges Regex-Pattern: {e}") from e
+
+        def _search_file(fpath):
+            try:
+                if os.path.getsize(fpath) > _MAX_GREP_FILE_BYTES:
+                    return
+            except OSError:
+                return
+            try:
+                with open(fpath, "rb") as f:
+                    raw = f.read(_MAX_GREP_FILE_BYTES)
+            except OSError:
+                return
+            if b"\x00" in raw[:8000]:
+                return  # binär
+            text = raw.decode("utf-8", errors="replace")
+            for i, line in enumerate(text.splitlines(), 1):
+                if cre.search(line):
+                    try:
+                        rel = os.path.relpath(fpath, root)
+                    except ValueError:
+                        rel = fpath
+                    hits.append({
+                        "path": rel.replace(os.sep, "/"),
+                        "line": i,
+                        "text": line[:500],
+                    })
+                    if len(hits) >= cap:
+                        return
+
+        if os.path.isfile(abs_path):
+            _search_file(abs_path)
+        else:
+            for dirpath, dirnames, filenames in os.walk(abs_path):
+                dirnames[:] = [
+                    d for d in dirnames
+                    if d not in _SKIP_DIR_NAMES and not d.startswith(".")
+                ]
+                # Stay under root
+                try:
+                    real_dp = os.path.realpath(dirpath)
+                    if not (real_dp == root or real_dp.startswith(root + os.sep)):
+                        dirnames[:] = []
+                        continue
+                except OSError:
+                    continue
+                for fn in filenames:
+                    if len(hits) >= cap:
+                        break
+                    _search_file(os.path.join(dirpath, fn))
+                if len(hits) >= cap:
+                    break
+
+    truncated = len(hits) >= cap
+    log.log(
+        "code_grep",
+        pattern=pattern[:80],
+        path=_rel_display(abs_path, root),
+        hits=len(hits),
+        engine=engine,
+    )
+    return {
+        "pattern": pattern,
+        "path": _rel_display(abs_path, root),
+        "root": root,
+        "hits": hits,
+        "count": len(hits),
+        "truncated": truncated,
+        "engine": engine,
+    }
+
+
+def search_replace(path, old, new):
+    """
+    Ersetzt old→new exakt einmal in einer Datei (1 Treffer Pflicht).
+    Backup wie WriteFile. Kein Regex.
+    """
+    if old is None or str(old) == "":
+        raise ValueError("SearchReplace: old darf nicht leer sein")
+    old = str(old)
+    new = "" if new is None else str(new)
+    abs_path, root = _resolve_path(path)
+    if not abs_path:
+        raise ValueError(f"Pfad außerhalb der Workspace-Roots: {path}")
+    if not os.path.isfile(abs_path):
+        raise ValueError(f"Datei nicht gefunden: {path}")
+
+    with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
+        content = f.read()
+    count = content.count(old)
+    if count == 0:
+        raise ValueError("SearchReplace: old-String nicht gefunden (0 Treffer)")
+    if count > 1:
+        raise ValueError(
+            f"SearchReplace: old-String kommt {count}× vor — muss exakt 1 Treffer sein"
+        )
+    if old == new:
+        return {
+            "path": _rel_display(abs_path, root),
+            "applied": False,
+            "reason": "no_change",
+        }
+    new_content = content.replace(old, new, 1)
+    # reuse write_file for backup + atomic write
+    result = write_file(path, new_content)
+    result["replaced"] = True
+    result["old_chars"] = len(old)
+    result["new_chars"] = len(new)
+    log.log("code_search_replace", path=_rel_display(abs_path, root), applied=result.get("applied"))
+    return result
 
 
 def propose_write(path, content):
@@ -257,6 +555,10 @@ _DENY_PATTERNS = [
     r"&&\s*rm\b",
     r";\s*rm\b",
     r"\|\s*rm\b",
+    # git push/pull/fetch nie erlauben (auch nicht über erweiterte Whitelist)
+    r"\bgit\s+push\b",
+    r"\bgit\s+pull\b",
+    r"\bgit\s+fetch\b",
 ]
 
 
@@ -381,6 +683,17 @@ def preview_for_confirm(tool_name, args):
             return f"WriteFile → {prop.get('path')}\n{diff or '(neue Datei / kein Diff)'}"
         except Exception as e:
             return f"WriteFile → {args.get('path')}: {e}"
+    if tool_name == "SearchReplace":
+        old = str(args.get("old") or "")
+        new = str(args.get("new") or "")
+        path = args.get("path")
+        preview_old = old if len(old) <= 400 else old[:400] + "…"
+        preview_new = new if len(new) <= 400 else new[:400] + "…"
+        return (
+            f"SearchReplace → {path}\n"
+            f"--- old ---\n{preview_old}\n"
+            f"+++ new ---\n{preview_new}"
+        )
     if tool_name == "RunCommand":
         return f"RunCommand → {args.get('command')}\ncwd={args.get('cwd') or '.'}"
     return f"{tool_name}: {args}"

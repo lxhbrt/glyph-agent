@@ -16,7 +16,7 @@ import time
 from . import config, llm, log, tool_registry
 from . import code_tools
 
-MAX_ROUNDS = getattr(config, "CODE_MAX_ROUNDS", 8) or 8
+MAX_ROUNDS = getattr(config, "CODE_MAX_ROUNDS", 16) or 16
 
 # Resume-State für Genehmigungen (In-Memory, Prozess-lokal)
 _PENDING_LOCK = threading.Lock()
@@ -28,13 +28,20 @@ _CODE_ROLE = (
     "Du bist ^_Code: ein Code-Agent in Glyph. Denker: DeepSeek V4 Flash "
     f"({getattr(config, 'CODE_OPENROUTER_MODEL', 'deepseek/deepseek-v4-flash-0731')}) "
     "über OpenRouter.\n"
-    "Du arbeitest NUR in konfigurierten Workspace-Roots (glyph-ui, glyph-agent, …).\n"
-    "Werkzeuge: ListDir, ReadFile, WriteFile (Diff+Backup), RunCommand (Whitelist).\n"
+    "Du arbeitest NUR in konfigurierten Workspace-Roots "
+    "(glyph-ui, glyph-agent, ~/.openclaw/workspace, …).\n"
+    "Werkzeuge: ListDir, ReadFile (offset/limit), Grep, SearchReplace (exakt 1 Treffer), "
+    "WriteFile (Diff+Backup), RunCommand (Whitelist).\n"
     "Regeln:\n"
-    "- Antworte auf Deutsch; sei präzise und handlungsorientiert.\n"
-    "- Bei Dateiänderungen: zuerst lesen (ReadFile), dann WriteFile mit komplettem Inhalt.\n"
-    "- Shell nur für Tests/Status (npm test, pytest, git status, ls, …) — keine destruktiven Befehle.\n"
-    "- WriteFile und RunCommand erfordern Nutzer-Genehmigung in Glyph; plane entsprechend.\n"
+    "- Antworte auf Deutsch; knapper Stil, präzise und handlungsorientiert.\n"
+    "- STOP_SLOP: Kern zuerst, aktiv, konkret. Keine Floskeln "
+    "(Gerne, Absolut, Zusammenfassend…, Es ist wichtig zu beachten, Als KI…, "
+    "I hope this helps, Let’s dive in). Keine erfundenen Normen/Facts.\n"
+    "- Bei kleinen Änderungen: Grep/ReadFile → SearchReplace (old muss exakt 1× vorkommen).\n"
+    "- Bei großen/neuen Dateien: ReadFile → WriteFile mit komplettem Inhalt.\n"
+    "- Shell nur für Tests/Status/Git (npm test, pytest, git status/add/commit/stash, "
+    "ls, mkdir, …) — kein rm/sudo/push, keine destruktiven Befehle.\n"
+    "- WriteFile, SearchReplace und RunCommand erfordern Nutzer-Genehmigung in Glyph.\n"
     "- Kein Vault, kein Obsidian, keine privaten Pfade außerhalb der Roots.\n"
     "- Bei Modell-Fragen: nenne DeepSeek V4 Flash und OpenRouter, Profil ^_Code.\n"
 )
@@ -63,11 +70,22 @@ def _pop_pending(token):
         return _PENDING.pop(token, None)
 
 
-def _call_code_llm(messages, temperature=0.2):
-    """OpenRouter-Chat mit CODE-Modell (temporärer Model-Swap am Provider)."""
+def _call_code_llm(messages, temperature=0.2, images=None):
+    """OpenRouter-Chat mit CODE-Modell (temporärer Model-Swap am Provider).
+
+    images: optionale OpenAI image_url-Parts (Vision). Viele Code-Modelle
+    (DeepSeek Flash) unterstützen KEINE Vision — dann kommt ein klarer API-Fehler.
+    """
     provider = llm.get_provider()
-    primary = getattr(config, "CODE_OPENROUTER_MODEL", "deepseek/deepseek-v4-flash-0731")
-    fallback = getattr(config, "CODE_OPENROUTER_FALLBACK_MODEL", None)
+    # Mit Bildern: Vision-Modell (Luna), sonst DeepSeek CODE
+    if images:
+        primary = getattr(config, "CODE_VISION_MODEL", None) or getattr(
+            config, "AGENT_OPENROUTER_MODEL", "openai/gpt-5.6-luna"
+        )
+        fallback = getattr(config, "AGENT_OPENROUTER_FALLBACK_MODEL", None)
+    else:
+        primary = getattr(config, "CODE_OPENROUTER_MODEL", "deepseek/deepseek-v4-flash-0731")
+        fallback = getattr(config, "CODE_OPENROUTER_FALLBACK_MODEL", None)
     old_model = getattr(provider, "model", None)
     old_fb = getattr(provider, "fallback_model", None)
     try:
@@ -80,11 +98,23 @@ def _call_code_llm(messages, temperature=0.2):
         for m in messages:
             role = m.get("role")
             content = m.get("content") or ""
+            if isinstance(content, list):
+                content = "\n".join(
+                    str(p.get("text") or "")
+                    for p in content
+                    if isinstance(p, dict) and p.get("type") == "text"
+                )
             if role == "system":
                 system_parts.append(content)
             else:
                 user_parts.append(f"{role}: {content}" if role != "user" else content)
         system = "\n\n".join(system_parts) if system_parts else _CODE_ROLE
+        if images:
+            system = (
+                system
+                + "\nDu kannst angehängte Screenshots/Bilder SEHEN (Vision), "
+                "falls das Modell es unterstützt. Nutze sie für UI-Bugs und Layout."
+            )
         user = "\n\n".join(user_parts)
         # Datenschutz: CODE darf mehr Kontext (Diffs), aber Cap behalten
         max_chars = int(getattr(config, "EXTERNAL_MAX_CHARS", 4000) or 4000)
@@ -95,8 +125,13 @@ def _call_code_llm(messages, temperature=0.2):
         # Hartes Total-Timeout (CODE_CHAT_TIMEOUT) — verhindert Einfrieren
         # wenn OpenRouter/DeepSeek nie zurückkehrt.
         chat_timeout = int(getattr(config, "CODE_CHAT_TIMEOUT", 60) or 60)
+        if images:
+            from .providers.openrouter import user_content_with_images
+            user_payload = user_content_with_images(user, images)
+        else:
+            user_payload = user
         text = provider.chat(
-            system, user, temperature=temperature, timeout=chat_timeout
+            system, user_payload, temperature=temperature, timeout=chat_timeout
         )
         return text or ""
     finally:
@@ -170,6 +205,7 @@ def run_code(
     on_event=None,
     resume_token=None,
     allow_pending=None,
+    images=None,
 ):
     """
     CODE-Tool-Loop.
@@ -178,6 +214,7 @@ def run_code(
     resume_token + allow_pending: Fortsetzen nach Glyph-Genehmigung
       allow_pending True  = freigegeben ausführen
       allow_pending False = abgelehnt, Modell informieren
+    images: optionale OpenAI image_url-Parts (Vision / Screenshots)
     """
     def _emit(event):
         if on_event is None:
@@ -188,6 +225,7 @@ def run_code(
             pass
 
     max_rounds = int(max_rounds or MAX_ROUNDS)
+    images = list(images or [])
 
     # --- Resume nach Genehmigung ---
     if resume_token:
@@ -220,6 +258,14 @@ def run_code(
     steps = []
     rounds = 0
     model_name = getattr(config, "CODE_OPENROUTER_MODEL", "deepseek/deepseek-v4-flash-0731")
+    if images:
+        steps.append({"step": "Vision", "status": "success", "detail": f"{len(images)} Bild(er)"})
+        _emit({
+            "type": "step",
+            "action": "Vision",
+            "status": "start",
+            "detail": f"{len(images)} Bild(er) — braucht Vision-fähiges CODE-Modell",
+        })
 
     return _loop(
         system=system,
@@ -233,6 +279,7 @@ def run_code(
         max_rounds=max_rounds,
         _emit=_emit,
         model_name=model_name,
+        images=images,
     )
 
 
@@ -304,6 +351,7 @@ def _continue_from_state(state, allow_pending, confirm, max_rounds, on_event, _e
         max_rounds=max_rounds,
         _emit=_emit,
         model_name=model_name,
+        images=list(state.get("images") or []),
     )
 
 
@@ -319,7 +367,9 @@ def _loop(
     max_rounds,
     _emit,
     model_name,
+    images=None,
 ):
+    images = list(images or [])
     while rounds < max_rounds:
         rounds += 1
         messages = [{"role": "system", "content": system}] + history
@@ -330,7 +380,7 @@ def _loop(
             "detail": f"DeepSeek CODE ({model_name})",
         })
         try:
-            reply = _call_code_llm(messages)
+            reply = _call_code_llm(messages, images=images or None)
         except Exception as e:
             _emit({"type": "step", "action": "OpenRouter", "status": "error", "detail": str(e)[:80]})
             return {
@@ -389,6 +439,7 @@ def _loop(
                     "pending_args": args,
                     "model_name": model_name,
                     "preview": preview,
+                    "images": images,
                 })
                 _emit({
                     "type": "pending_confirmation",

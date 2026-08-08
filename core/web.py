@@ -188,6 +188,22 @@ def fetch_tinyfish(url, fmt="markdown"):
         return resp.read().decode("utf-8")
 
 
+def browse_url(url, goal=None, timeout=None):
+    """
+    Wrapper um TinyFish Extract mit Ziel „Zusammenfassung“.
+    Für Überblick ohne eigenes JSON-Schema (Tool BrowseUrl).
+    """
+    if not url:
+        raise RuntimeError("browse_url braucht url.")
+    g = (goal or "").strip() or (
+        "Fasse die Seite knapp zusammen: Titel, Kernaussagen (3–8 Bulletpoints), "
+        "wichtige Zahlen/Daten, und nenne die Quelle (URL). Antworte als JSON "
+        "mit keys: title, summary, bullets (array of strings), key_facts (array)."
+    )
+    result = extract_tinyfish(url, g, timeout=timeout)
+    return {"url": url, "goal": g, "result": result}
+
+
 # --- Dispatch (für Tool-Registry) ------------------------------------------
 def web_search(query, count=5, source="exa"):
     """

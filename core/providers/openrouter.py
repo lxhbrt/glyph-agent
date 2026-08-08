@@ -53,6 +53,65 @@ def _resolve_chat_timeout(timeout=None):
         return 60
 
 
+def _content_chars(content):
+    """Zeichenzahl für Logging — str oder multimodal list (text + image_url)."""
+    if content is None:
+        return 0
+    if isinstance(content, str):
+        return len(content)
+    if isinstance(content, list):
+        n = 0
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "text":
+                n += len(str(part.get("text") or ""))
+            elif part.get("type") == "image_url":
+                # Bild zählt pauschal (Base64 nicht voll mitzählen)
+                n += 2000
+        return n
+    return len(str(content))
+
+
+def user_content_with_images(text, images=None):
+    """OpenAI multimodal user content: Text + optionale image_url-Parts.
+
+    images: Liste von {type:'image_url', image_url:{url}} oder rohen
+    {mime, data} / {mimeType, data}-Dicts.
+    """
+    text = text if text is not None else ""
+    if not images:
+        return text
+    parts = []
+    t = str(text).strip()
+    if t:
+        parts.append({"type": "text", "text": str(text)})
+    else:
+        parts.append({"type": "text", "text": "(Bild angehängt — bitte beschreiben/analysieren.)"})
+    for img in images:
+        if not isinstance(img, dict):
+            continue
+        if img.get("type") == "image_url" and isinstance(img.get("image_url"), dict):
+            url = img["image_url"].get("url")
+            if url:
+                parts.append({"type": "image_url", "image_url": {"url": url}})
+            continue
+        mime = str(img.get("mime") or img.get("mimeType") or "image/png").lower()
+        data = img.get("data") or img.get("content") or ""
+        if not data:
+            continue
+        data = str(data).replace("data:" + mime + ";base64,", "")
+        if str(data).startswith("data:"):
+            # already a data URI
+            parts.append({"type": "image_url", "image_url": {"url": str(data)}})
+        else:
+            parts.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{data}"},
+            })
+    return parts if len(parts) > 1 or (parts and parts[0].get("type") == "image_url") else (text or "")
+
+
 class OpenRouterProvider(ModelProvider):
     def __init__(self, url=None, model=None, api_key=None, fallback_model=None):
         self.url = url or os.environ.get("OPENROUTER_URL", "https://openrouter.ai/api/v1")
@@ -112,7 +171,7 @@ class OpenRouterProvider(ModelProvider):
         self._ensure_key()
         m = model or self.model
         wall = _resolve_chat_timeout(timeout)
-        total_chars = sum(len(x.get("content", "")) for x in messages)
+        total_chars = sum(_content_chars(x.get("content")) for x in messages)
         _agent_log.log(
             "cloud_send",
             provider=self.provider_name,
@@ -225,6 +284,7 @@ class OpenRouterProvider(ModelProvider):
         )
 
     def chat(self, system, user, temperature=0.3, num_ctx=8192, timeout=None):
+        """Chat. `user` darf str ODER multimodal list (text + image_url) sein."""
         return self._with_free_fallback(
             [
                 {"role": "system", "content": system},

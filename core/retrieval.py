@@ -310,7 +310,7 @@ def _keyword_boost(query: str, doc: dict) -> float:
 
     Boost-Werte moderat: bei Vektor-Scores 0.65–0.72 heben 0.04–0.16 die richtige
     Grundlagen-MOC deutlich nach vorne, ohne die Vektorsuche zu überstimmen.
-    Nur exakte Begriffe (nicht Teilstrings wie 'Arbeitsschutzmaßnahmen' als Volltreffer).
+    Zusätzlich: allgemeine Query-Tokens (inkl. Daten YYYY-MM-DD) im Titel/Pfad.
     """
     query_norm = _normalize(query)
     path = _normalize(doc.get("path") or "")
@@ -344,6 +344,23 @@ def _keyword_boost(query: str, doc: dict) -> float:
         elif term in path:
             boost += 0.04
 
+    # Allgemeine Tokens aus der Frage (Dateiname/Datum) — moderat, gecappt
+    try:
+        from . import vault_tools as _vt
+        tokens = _vt._tokenize_query(query)
+    except Exception:
+        tokens = []
+    general = 0.0
+    for term in tokens:
+        if term in ("arbeitsschutz", "arbeitssicherheit"):
+            continue  # bereits oben
+        if len(term) < 3 and not any(c.isdigit() for c in term):
+            continue
+        if term in title:
+            general += 0.08 if any(c.isdigit() for c in term) else 0.05
+        elif term in path:
+            general += 0.05 if any(c.isdigit() for c in term) else 0.03
+    boost += min(general, 0.20)
     return boost
 
 
@@ -511,7 +528,23 @@ def vault_find(query, top_k=None, min_score=None,
             k = kw_by_path.get(p, 0.0)
             meta = {"path": p, "title": p.rsplit("/", 1)[-1], "section": "", "text": ""}
         hybrid = vw * float(v) + tw * float(k)
-        if hybrid < min_score and float(v) < min_score and float(k) < 0.5:
+        # Kanonische Live-Dateien vor Wiki-Source-Hash-Archiven (gleiche Logik wie search_vault)
+        path_for_rank = meta.get("path") or p
+        # Vault-Name aus Index-Pfad (/HSEQ Sync/…) oder Keyword-Hit
+        vault_guess = ""
+        pl = path_for_rank.replace("\\", "/").lstrip("/")
+        if "/" in pl:
+            vault_guess = pl.split("/", 1)[0]
+        rank_bonus = vault_tools.path_source_rank(
+            path_for_rank, vault_name=vault_guess, query=query
+        )
+        # rank_bonus ist in Keyword-Hit-Einheiten (~±50); skaliere auf 0–1-Hybrid
+        hybrid = hybrid + (rank_bonus / 100.0)
+        # Archiv-Kopien: nur behalten wenn Keyword/Vektor klar stark
+        if vault_tools._is_archive_source_path(path_for_rank):
+            if float(k) < 0.85 and float(v) < min_score:
+                continue
+        elif hybrid < min_score and float(v) < min_score and float(k) < 0.5:
             continue
         entry = {
             "path": meta.get("path") or p,

@@ -82,16 +82,55 @@ CODE_OPENROUTER_MODEL = os.environ.get(
 CODE_OPENROUTER_FALLBACK_MODEL = os.environ.get(
     "CODE_OPENROUTER_FALLBACK_MODEL", "deepseek/deepseek-v4-flash"
 )
-# Erlaubte Dateisystem-Roots (Komma-getrennt). Default: glyph-ui + glyph-agent.
+# Screenshots/Bilder: DeepSeek Flash hat oft keine Vision — dann Luna (oder Override).
+CODE_VISION_MODEL = os.environ.get(
+    "CODE_VISION_MODEL",
+    os.environ.get("AGENT_OPENROUTER_MODEL", "openai/gpt-5.6-luna"),
+)
+# Erlaubte Dateisystem-Roots (Komma-getrennt). Nur existierende Dirs nach expanduser.
+# Default: glyph-ui, glyph-agent, ~/.openclaw/workspace; optional ~/grok-chat-ui wenn vorhanden.
 _HOME = os.path.expanduser("~")
-CODE_WORKSPACE_ROOTS = [
-    os.path.realpath(p.strip())
-    for p in os.environ.get(
-        "CODE_WORKSPACE_ROOTS",
-        f"{_HOME}/glyph-ui,{_HOME}/glyph-agent",
-    ).split(",")
-    if p.strip()
+_CODE_ROOTS_DEFAULT_CANDIDATES = [
+    f"{_HOME}/glyph-ui",
+    f"{_HOME}/glyph-agent",
+    f"{_HOME}/.openclaw/workspace",
+    f"{_HOME}/grok-chat-ui",  # optional — nur wenn Dir existiert
 ]
+
+
+def _filter_existing_roots(candidates):
+    """Expandiert Pfade und behält nur existierende Verzeichnisse (realpath)."""
+    out = []
+    seen = set()
+    for p in candidates or []:
+        p = (p or "").strip()
+        if not p:
+            continue
+        try:
+            expanded = os.path.expanduser(p)
+            if not os.path.isdir(expanded):
+                continue
+            real = os.path.realpath(expanded)
+        except OSError:
+            continue
+        if real in seen:
+            continue
+        seen.add(real)
+        out.append(real)
+    return out
+
+
+_code_roots_env = os.environ.get("CODE_WORKSPACE_ROOTS", "").strip()
+if _code_roots_env:
+    _code_root_candidates = [p.strip() for p in _code_roots_env.split(",") if p.strip()]
+else:
+    _code_root_candidates = list(_CODE_ROOTS_DEFAULT_CANDIDATES)
+CODE_WORKSPACE_ROOTS = _filter_existing_roots(_code_root_candidates)
+# Wenn true (Default): alle Datei-Tools bleiben roots-only (v1: immer roots-only).
+# Env nur dokumentiert/reserviert — Escapes außerhalb der Roots bleiben verboten.
+CODE_WORKSPACE_ONLY = os.environ.get("CODE_WORKSPACE_ONLY", "true").lower() in (
+    "1", "true", "yes", "on",
+)
 CODE_BACKUP_DIR = os.environ.get(
     "CODE_BACKUP_DIR",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "vault", "code_backups"),
@@ -102,7 +141,7 @@ CODE_SHELL_TIMEOUT = int(os.environ.get("CODE_SHELL_TIMEOUT", "60"))
 CHAT_TIMEOUT = int(os.environ.get("CHAT_TIMEOUT", "60"))
 # CODE-Modus: eigener Override (Default = CHAT_TIMEOUT).
 CODE_CHAT_TIMEOUT = int(os.environ.get("CODE_CHAT_TIMEOUT", str(CHAT_TIMEOUT)))
-# Shell-Whitelist (Regex, match auf den gesamten Befehl). Nie rm/sudo usw. (Deny in code_tools).
+# Shell-Whitelist (Regex, match auf den gesamten Befehl). Nie rm/sudo/push usw. (Deny in code_tools).
 # Env-Override: CODE_SHELL_ALLOW mit Einträgen getrennt durch "||" (Komma bricht |Alternativen).
 _CODE_SHELL_DEFAULT = [
     r"^ls(\s|$)",
@@ -115,14 +154,25 @@ _CODE_SHELL_DEFAULT = [
     r"^rg(\s|$)",
     r"^grep(\s|$)",
     r"^find(\s|$)",
-    r"^git (status|diff|log|show|branch|rev-parse|remote|stash list)(\s|$)",
+    r"^diff(\s|$)",
+    r"^mkdir(\s|$)",
+    r"^touch(\s|$)",
+    r"^cp(\s|$)",
+    # git: read + add/commit/stash — KEIN push/pull/fetch (Deny + kein Allow)
+    r"^git (status|diff|log|show|branch|rev-parse|remote)(\s|$)",
+    r"^git add(\s|$)",
+    r"^git commit(\s|$)",
+    r"^git stash(\s|$)",
     r"^npm (test|run|install|ci|ls|view|pack|outdated)(\s|$)",
     r"^npx(\s|$)",
     r"^pytest(\s|$)",
     r"^python3? -m pytest(\s|$)",
     r"^python3? -m unittest(\s|$)",
     r"^python3? --version$",
+    # python3/node: Script-Datei oder -m Modul (cwd unter Root)
+    r"^python3?(\s+\S+\.py|\s+-m\s)",
     r"^node --version$",
+    r"^node(\s+\S+\.(js|mjs|cjs))",
     r"^npm --version$",
 ]
 _code_shell_env = os.environ.get("CODE_SHELL_ALLOW", "").strip()
@@ -131,7 +181,7 @@ CODE_SHELL_ALLOW = (
     if _code_shell_env
     else list(_CODE_SHELL_DEFAULT)
 )
-CODE_MAX_ROUNDS = int(os.environ.get("CODE_MAX_ROUNDS", "8"))
+CODE_MAX_ROUNDS = int(os.environ.get("CODE_MAX_ROUNDS", "16"))
 
 # Geschützte Ordner(namen) im Vault — werden von SUCHEN/LESEN/EDITIEREN ausgeschlossen.
 BLOCKED_DIRS = [

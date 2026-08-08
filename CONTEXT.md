@@ -4,6 +4,8 @@ Lokale Engine hinter dem Glyph-Profil **glyph-agent**: Vault-Gedächtnis, Recher
 
 ## Language
 
+**Nutzerantworten:** stop-slop (immer) — Kern zuerst, kein AI-Slop, keine erfundenen Normen.
+
 **Cloud-Antwort**:
 Die vom Cloud-Denker formulierte Nutzerantwort im B+-Pfad (nach VaultFind/Web/Tools). In UI und Nutzer-Doku so nennen.
 _Avoid_: OpenRouter-Antwort, OpenRouter-Chat (als Nutzerbegriff)
@@ -34,6 +36,20 @@ _Avoid_: „3-Stufen-Fallback“ / lokaler Chat-Fallback (existiert nicht mehr; 
 ## Settled decisions (C′ 2026-08-07)
 
 - **glyph-agent Default** bleibt **Vault-only** (kein Shell, kein allgemeines Repo-Schreiben).
-- **`MODE=code`** (per Request `mode: "code"`): ^_Code-Pfad — Tools `ListDir` / `ReadFile` / `WriteFile` / `RunCommand`, Denker `CODE_OPENROUTER_MODEL` (Default `deepseek/deepseek-v4-flash-0731`).
+- **`MODE=code`** (per Request `mode: "code"`): ^_Code-Pfad — Tools `ListDir` / `ReadFile` / `Grep` / `SearchReplace` / `WriteFile` / `RunCommand`, Denker `CODE_OPENROUTER_MODEL` (Default `deepseek/deepseek-v4-flash-0731`).
 - Write/Shell brauchen **Glyph-Genehmigung** (`pending_confirmation` + `resume_token`); nie auto-approve.
-- Shell: Whitelist + Deny-Liste + Timeout + nur `CODE_WORKSPACE_ROOTS`.
+- Shell: Whitelist + Deny-Liste + Timeout + nur `CODE_WORKSPACE_ROOTS` (Default: glyph-ui, glyph-agent, `~/.openclaw/workspace`; optional `~/grok-chat-ui` wenn vorhanden; nur existierende Dirs).
+
+## Settled decisions (Vault-Inventar 2026-08-08)
+
+- **ListVaultDir** (Agent-Modus): Ordner im Vault listen (read-only). Für „was liegt im Eingang/Fertig?“ — Precheck bei Inventar-Fragen.
+- **VaultFind** bleibt Inhaltssuche (Hybrid Embedding+Keyword); listet keine Ordner.
+- **search_vault**: Token-Suche + Dateiname/Pfad (nicht nur Fullstring im Body). Datum nur im Namen zählt.
+- Inventar-Fragen mit Jahreszahlen im Namen lösen **kein** Web-Precheck aus (domain-lokal).
+- **Ranking:** Primär-Vault (`VAULT_PATHS[0]`, HSEQ Sync) und `00 Arbeitsfluss/Eingang|Fertig` vor OpenClaw-Wiki-`sources/` / `unsafe-local-*`-Hash-Slugs. Body-Treffer-Cap, damit lange Archiv-Kopien Datums-Queries nicht dominieren. Nutzer trifft gültige Live-Dateien, nicht alte Source-Nummern.
+
+## Settled decisions (OpenClaw-Tools 2026-08-07)
+
+- **°_Agent**: Wiki-Aliase `WikiSearch`→VaultFind, `WikiGet`→ReadNote, `WikiApply`→ApplyEdit; `WikiStatus` liest agent-digest (read-only).
+- `BrowseUrl` = TinyFish Extract mit Summary-Goal; `ReadPdf` via pdftotext (Vault only); Mail via himalaya; `MessageSend` via openclaw (write+confirm).
+- Kein Shell im Agent-Modus. Externe CLIs graceful degrade.

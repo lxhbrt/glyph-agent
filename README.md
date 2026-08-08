@@ -30,7 +30,8 @@ Separater Pfad, **nicht** der Vault-Default:
 
 ```text
 Nutzerfrage (mode=code)
-  → ListDir / ReadFile / WriteFile / RunCommand   [nur CODE_WORKSPACE_ROOTS]
+  → ListDir / ReadFile / Grep / SearchReplace / WriteFile / RunCommand
+  → nur CODE_WORKSPACE_ROOTS (existierende Dirs)
   → DeepSeek V4 Flash (OpenRouter) formuliert
   → Write/Shell → pending_confirmation + resume_token (Glyph-Genehmigung)
 ```
@@ -38,19 +39,22 @@ Nutzerfrage (mode=code)
 | Variable | Default | Bedeutung |
 |----------|---------|-----------|
 | `CODE_OPENROUTER_MODEL` | `deepseek/deepseek-v4-flash-0731` | Denker |
-| `CODE_WORKSPACE_ROOTS` | `~/glyph-ui,~/glyph-agent` | erlaubte Roots |
+| `CODE_WORKSPACE_ROOTS` | `~/glyph-ui,~/glyph-agent,~/.openclaw/workspace` (+ `~/grok-chat-ui` wenn Dir existiert) | erlaubte Roots (nur existierende) |
+| `CODE_WORKSPACE_ONLY` | `true` | roots-only (v1 immer; Env reserviert) |
 | `CODE_SHELL_TIMEOUT` | `60` | Shell-Timeout (s) |
 | `CHAT_TIMEOUT` | `60` | Hartes Total-Timeout pro OpenRouter-Chat-Call (s) |
 | `CODE_CHAT_TIMEOUT` | `= CHAT_TIMEOUT` | dasselbe im CODE-Modus (DeepSeek) |
 | `CODE_SHELL_ALLOW` | (Builtin-Whitelist) | Regex-Liste, Trenner `\|\|` |
-| `CODE_MAX_ROUNDS` | `8` | Tool-Loop-Runden |
+| `CODE_MAX_ROUNDS` | `16` | Tool-Loop-Runden |
 
 **Stabilität:** `server.py` nutzt `ThreadingHTTPServer` (hängender `/chat` blockiert nicht `/health`).
 Jeder Cloud-Call hat Wall-Clock-Timeout (Worker + `future.result`); ACP-Client bricht per
 `GLYPH_AGENT_TIMEOUT` ab (Default CODE 8 min / agent 5 min).
 
-Tools: **ListDir**, **ReadFile**, **WriteFile** (Diff+Backup), **RunCommand** (Whitelist + Deny).  
+Tools: **ListDir** (optional recursive depth≤2), **ReadFile** (offset/limit Zeilen), **Grep**,
+**SearchReplace** (exakt 1 Treffer, Backup), **WriteFile** (Diff+Backup), **RunCommand** (Whitelist + Deny).  
 Write/Shell brauchen Confirm; ohne `confirm`/`resume_token`+`allow` → `pending_confirmation`.
+Shell-Whitelist u. a.: git status/diff/log/add/commit/stash (kein push), mkdir/touch/cp/diff, python3/node Scripts.
 
 ### Provider
 
@@ -160,11 +164,13 @@ glyph-agent/
 │   ├── llm.py          # Provider-Brücke
 │   ├── tool_loop.py    # Agenten-Loop (Vault)
 │   ├── code_loop.py    # CODE-Loop (^_Code)
-│   ├── code_tools.py   # ListDir/Read/Write/Run (Workspace)
+│   ├── code_tools.py   # ListDir/Read/Grep/SearchReplace/Write/Run
 │   ├── tool_registry.py
-│   ├── vault_tools.py
+│   ├── vault_tools.py  # + wiki_status
+│   ├── pdf_tools.py    # ReadPdf (pdftotext)
+│   ├── comm_tools.py   # MailList/MailRead/MessageSend
 │   ├── agent.py
-│   ├── web.py
+│   ├── web.py          # + BrowseUrl
 │   └── providers/
 │       ├── openrouter.py # Luna → free
 │       ├── fallback.py   # Alias derselben Kette
@@ -177,22 +183,29 @@ glyph-agent/
 
 ## Tools
 
-### agent (Vault / B+)
+### agent (Vault / B+ / °_Agent)
 
 | Tool | Rolle |
 |------|--------|
-| **VaultFind** | Hybrid Embedding+Keyword. Aliase: VaultRecall, VaultSearch |
-| ReadNote / Summarize / CreateNote / ProposeEdit / ApplyEdit | Vault lesen/schreiben |
+| **VaultFind** | Hybrid Embedding+Keyword. Aliase: VaultRecall, VaultSearch, **WikiSearch** |
+| ReadNote / **WikiGet** / Summarize | Vault lesen |
+| CreateNote / ProposeEdit / ApplyEdit / **WikiApply** | Vault schreiben (Confirm) |
+| **WikiStatus** | agent-digest Stats (read-only) |
 | WebSearch (Exa) | grobe Websuche |
-| ExtractUrl / FetchUrl (TinyFish) | feine Zielseiten |
+| ExtractUrl / FetchUrl / **BrowseUrl** (TinyFish) | feine Zielseiten / Summary |
+| **ReadPdf** | PDF im Vault via pdftotext (graceful) |
+| **MailList** / **MailRead** | himalaya (graceful) |
+| **MessageSend** | openclaw message send (Confirm, graceful) |
 | ObsidianOpen | optional kepano-CLI, pfadgebunden |
+
+Kein Shell im Agent-Modus.
 
 ### code (^_Code)
 
 | Tool | Rolle |
 |------|--------|
-| ListDir / ReadFile | Workspace lesen (nur `CODE_WORKSPACE_ROOTS`) |
-| WriteFile | Schreiben mit Diff+Backup; braucht Glyph-Confirm |
+| ListDir / ReadFile / **Grep** | Workspace lesen (nur `CODE_WORKSPACE_ROOTS`) |
+| **SearchReplace** / WriteFile | Schreiben mit Backup; braucht Glyph-Confirm |
 | RunCommand | Shell Whitelist+Timeout; braucht Glyph-Confirm |
 
 Index-Hygiene: `python3 scripts/index_hygiene.py`

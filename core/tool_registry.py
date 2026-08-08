@@ -43,8 +43,38 @@ TOOLS = [
         "write": False,
     },
     {
+        # OpenClaw-Wiki-Alias → VaultFind
+        "name": "WikiSearch",
+        "description": "Alias für VaultFind (OpenClaw-Wiki-Kompatibilität). Bevorzuge VaultFind.",
+        "args": {"query": "str", "top_k": "int (optional)", "min_score": "float (optional)"},
+        "write": False,
+    },
+    {
+        "name": "ListVaultDir",
+        "description": (
+            "Listet Dateien/Ordner im Obsidian-Vault (nur Lesen). "
+            "Für Inventar-Fragen ('was liegt im Eingang?', 'welche Dateien in Fertig?'). "
+            "Pfad relativ zu einem Vault, optional mit Vault-Präfix "
+            "(z.B. '00 Arbeitsfluss/Eingang' oder 'HSEQ Sync/00 Arbeitsfluss/Eingang'). "
+            "Leer/'.' = Top-Level aller Vaults. Kein Ersatz für VaultFind (Inhaltssuche)."
+        ),
+        "args": {
+            "path": "str (optional, Default '.')",
+            "limit": "int (optional, Default 200)",
+            "extensions": "list[str] (optional, z.B. ['.md','.pdf'])",
+        },
+        "write": False,
+    },
+    {
         "name": "ReadNote",
         "description": "Liest eine Notiz aus dem Vault (relativer Pfad).",
+        "args": {"path": "str, z.B. Themen/PSA.md"},
+        "write": False,
+    },
+    {
+        # OpenClaw-Wiki-Alias → ReadNote
+        "name": "WikiGet",
+        "description": "Alias für ReadNote (OpenClaw-Wiki-Kompatibilität).",
         "args": {"path": "str, z.B. Themen/PSA.md"},
         "write": False,
     },
@@ -73,10 +103,26 @@ TOOLS = [
         "write": True,
     },
     {
+        # OpenClaw-Wiki-Alias → ApplyEdit (write + confirm)
+        "name": "WikiApply",
+        "description": "Alias für ApplyEdit (OpenClaw-Wiki). Braucht Nutzer-Bestätigung.",
+        "args": {"path": "str", "new_content": "str, kompletter neuer Inhalt"},
+        "write": True,
+    },
+    {
+        "name": "WikiStatus",
+        "description": (
+            "Read-only Wiki-Status aus OpenClaw agent-digest.json "
+            "(pageCounts, claimHealth, …). Kein Schreiben."
+        ),
+        "args": {},
+        "write": False,
+    },
+    {
         "name": "WebSearch",
         "description": (
             "Grobe Web-Recherche (Standard: Exa). NUR anonymisierte Suchbegriffe. "
-            "source=tinyfish nur als Zweitquelle. Für konkrete URLs: ExtractUrl/FetchUrl."
+            "source=tinyfish nur als Zweitquelle. Für konkrete URLs: ExtractUrl/FetchUrl/BrowseUrl."
         ),
         "args": {"query": "str, anonymisierter Suchbegriff", "count": "int (optional)", "source": "str (optional: 'exa' oder 'tinyfish')"},
         "write": False,
@@ -94,6 +140,62 @@ TOOLS = [
         "write": False,
     },
     {
+        "name": "BrowseUrl",
+        "description": (
+            "URL besuchen und kurze Zusammenfassung holen (TinyFish Extract, goal=Summary). "
+            "Für Überblick ohne eigenes JSON-Schema."
+        ),
+        "args": {"url": "str", "goal": "str (optional, Default: Zusammenfassung der Seite)"},
+        "write": False,
+    },
+    {
+        "name": "ReadPdf",
+        "description": (
+            "Liest Text aus einer PDF-Datei im Vault (pdftotext CLI, graceful wenn fehlt). "
+            "Nur Vault-Pfade; Zeichen-Cap."
+        ),
+        "args": {"path": "str, vault-relativer .pdf-Pfad", "max_chars": "int (optional)"},
+        "write": False,
+    },
+    {
+        "name": "MailList",
+        "description": (
+            "Listet E-Mail-Envelopes via himalaya CLI (graceful wenn fehlt). Read-only."
+        ),
+        "args": {
+            "folder": "str (optional, Default INBOX)",
+            "query": "str (optional, himalaya Filter)",
+            "limit": "int (optional, Default 20)",
+            "account": "str (optional)",
+        },
+        "write": False,
+    },
+    {
+        "name": "MailRead",
+        "description": "Liest eine E-Mail via himalaya (message id). Read-only.",
+        "args": {
+            "id": "str|int, Envelope-ID",
+            "folder": "str (optional, Default INBOX)",
+            "account": "str (optional)",
+            "preview": "bool (optional, kein seen-Flag)",
+        },
+        "write": False,
+    },
+    {
+        "name": "MessageSend",
+        "description": (
+            "Sendet eine Nachricht über openclaw message send (Gateway). "
+            "Braucht Nutzer-Bestätigung. Graceful wenn openclaw/Gateway fehlt."
+        ),
+        "args": {
+            "target": "str, Empfänger/Kanal-Ziel",
+            "message": "str, Nachrichtentext",
+            "channel": "str (optional, z.B. telegram|discord|…)",
+            "account": "str (optional)",
+        },
+        "write": True,
+    },
+    {
         "name": "ObsidianOpen",
         "description": (
             "Optional: öffnet eine Vault-Notiz in der Obsidian-App (kepano-CLI). "
@@ -108,14 +210,42 @@ TOOLS = [
 CODE_TOOLS = [
     {
         "name": "ListDir",
-        "description": "Listet Dateien/Ordner relativ zu einem Workspace-Root (nicht rekursiv).",
-        "args": {"path": "str (optional, Default '.')"},
+        "description": (
+            "Listet Dateien/Ordner relativ zu einem Workspace-Root. "
+            "Optional recursive (max depth 2) mit Entry-Cap."
+        ),
+        "args": {
+            "path": "str (optional, Default '.')",
+            "recursive": "bool (optional)",
+            "max_depth": "int (optional, max 2)",
+        },
         "write": False,
     },
     {
         "name": "ReadFile",
-        "description": "Liest eine Datei innerhalb der CODE_WORKSPACE_ROOTS (Text, UTF-8).",
-        "args": {"path": "str"},
+        "description": (
+            "Liest eine Datei innerhalb der CODE_WORKSPACE_ROOTS (Text, UTF-8). "
+            "Optional offset/limit in Zeilen (1-basiert)."
+        ),
+        "args": {
+            "path": "str",
+            "offset": "int (optional, 1-basierte Startzeile)",
+            "limit": "int (optional, max. Zeilen)",
+        },
+        "write": False,
+    },
+    {
+        "name": "Grep",
+        "description": (
+            "Sucht Regex/Text in Dateien unter path (nur Workspace-Roots). "
+            "rg wenn vorhanden, sonst Python-Walk. Cap auf Treffer."
+        ),
+        "args": {
+            "pattern": "str",
+            "path": "str (optional, Default '.')",
+            "max_hits": "int (optional, Default 50)",
+            "case_insensitive": "bool (optional)",
+        },
         "write": False,
     },
     {
@@ -128,10 +258,19 @@ CODE_TOOLS = [
         "write": True,
     },
     {
+        "name": "SearchReplace",
+        "description": (
+            "Ersetzt old→new exakt einmal in einer Datei (1 Treffer Pflicht). "
+            "Backup wie WriteFile. Benötigt Glyph-Genehmigung."
+        ),
+        "args": {"path": "str", "old": "str, exakter bisheriger Text", "new": "str, Ersatz"},
+        "write": True,
+    },
+    {
         "name": "RunCommand",
         "description": (
-            "Führt einen Whitelist-Shell-Befehl im Workspace aus (z.B. git status, "
-            "npm test, pytest, ls). Benötigt Glyph-Genehmigung. Kein rm/sudo."
+            "Führt einen Whitelist-Shell-Befehl im Workspace aus (z.B. git status/add/commit, "
+            "npm test, pytest, ls, mkdir, cp). Benötigt Glyph-Genehmigung. Kein rm/sudo/push."
         ),
         "args": {
             "command": "str",
@@ -248,13 +387,23 @@ def execute(tool_name, args, confirm=None, mode="agent"):
 
 
 def _execute_agent(tool_name, args):
-    if tool_name in ("VaultFind", "VaultRecall", "VaultSearch"):
+    if tool_name in ("VaultFind", "VaultRecall", "VaultSearch", "WikiSearch"):
         q = args.get("query", "")
         top_k = int(args.get("top_k") or args.get("limit") or 4)
         min_score = float(args.get("min_score", 0.35))
         res = retrieval.vault_find(q, top_k=top_k, min_score=min_score)
         return {"ok": True, "result": res}
-    if tool_name == "ReadNote":
+    if tool_name == "ListVaultDir":
+        ext = args.get("extensions")
+        if isinstance(ext, str):
+            ext = [x.strip() for x in ext.split(",") if x.strip()]
+        res = vault_tools.list_vault_dir(
+            path=args.get("path") or ".",
+            limit=int(args.get("limit") or 200),
+            extensions=ext,
+        )
+        return {"ok": True, "result": res}
+    if tool_name in ("ReadNote", "WikiGet"):
         res = vault_tools.read_note(args.get("path"))
         return {"ok": True, "result": res}
     if tool_name == "Summarize":
@@ -268,8 +417,11 @@ def _execute_agent(tool_name, args):
         from . import agent as agent_mod
         prop = agent_mod.build_edit_proposal(args.get("path"), args.get("instruction", ""))
         return {"ok": True, "result": prop}
-    if tool_name == "ApplyEdit":
+    if tool_name in ("ApplyEdit", "WikiApply"):
         res = vault_tools.apply_edit(args.get("path"), args.get("new_content", ""))
+        return {"ok": True, "result": res}
+    if tool_name == "WikiStatus":
+        res = vault_tools.wiki_status()
         return {"ok": True, "result": res}
     if tool_name == "WebSearch":
         res = web.web_search(
@@ -284,6 +436,45 @@ def _execute_agent(tool_name, args):
     if tool_name == "FetchUrl":
         res = web.fetch_tinyfish(args.get("url", ""), "markdown")
         return {"ok": True, "result": res}
+    if tool_name == "BrowseUrl":
+        res = web.browse_url(args.get("url", ""), args.get("goal"))
+        return {"ok": True, "result": res}
+    if tool_name == "ReadPdf":
+        from . import pdf_tools
+        max_chars = args.get("max_chars")
+        res = pdf_tools.read_pdf(
+            args.get("path", ""),
+            max_chars=int(max_chars) if max_chars is not None else None,
+        )
+        return {"ok": True, "result": res}
+    if tool_name == "MailList":
+        from . import comm_tools
+        limit = args.get("limit")
+        res = comm_tools.mail_list(
+            folder=args.get("folder") or "INBOX",
+            query=args.get("query") or "",
+            limit=int(limit) if limit is not None else 20,
+            account=args.get("account"),
+        )
+        return {"ok": True, "result": res}
+    if tool_name == "MailRead":
+        from . import comm_tools
+        res = comm_tools.mail_read(
+            msg_id=args.get("id") or args.get("msg_id"),
+            folder=args.get("folder") or "INBOX",
+            account=args.get("account"),
+            preview=bool(args.get("preview", True)),
+        )
+        return {"ok": True, "result": res}
+    if tool_name == "MessageSend":
+        from . import comm_tools
+        res = comm_tools.message_send(
+            target=args.get("target", ""),
+            message=args.get("message", ""),
+            channel=args.get("channel"),
+            account=args.get("account"),
+        )
+        return {"ok": True, "result": res}
     if tool_name == "ObsidianOpen":
         res = vault_tools.obsidian_open(args.get("path", ""))
         return {"ok": True, "result": res}
@@ -293,13 +484,36 @@ def _execute_agent(tool_name, args):
 def _execute_code(tool_name, args):
     from . import code_tools
     if tool_name == "ListDir":
-        res = code_tools.list_dir(args.get("path") or ".")
+        res = code_tools.list_dir(
+            args.get("path") or ".",
+            recursive=bool(args.get("recursive")),
+            max_depth=args.get("max_depth"),
+        )
         return {"ok": True, "result": res}
     if tool_name == "ReadFile":
-        res = code_tools.read_file(args.get("path"))
+        res = code_tools.read_file(
+            args.get("path"),
+            offset=args.get("offset"),
+            limit=args.get("limit"),
+        )
+        return {"ok": True, "result": res}
+    if tool_name == "Grep":
+        res = code_tools.grep(
+            args.get("pattern", ""),
+            path=args.get("path") or ".",
+            max_hits=args.get("max_hits"),
+            case_insensitive=bool(args.get("case_insensitive")),
+        )
         return {"ok": True, "result": res}
     if tool_name == "WriteFile":
         res = code_tools.write_file(args.get("path"), args.get("content", ""))
+        return {"ok": True, "result": res}
+    if tool_name == "SearchReplace":
+        res = code_tools.search_replace(
+            args.get("path"),
+            args.get("old"),
+            args.get("new"),
+        )
         return {"ok": True, "result": res}
     if tool_name == "RunCommand":
         timeout = args.get("timeout")

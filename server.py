@@ -35,21 +35,67 @@ from core import code_loop
 PORT = int(os.environ.get("GLYPH_AGENT_PORT", "18899"))
 HOST = os.environ.get("GLYPH_AGENT_HOST", "127.0.0.1")
 
-# --- Textanhänge (Stufe 1) ---
+# --- Textanhänge (Stufe 1) + PDF wenn extrahierbar ---
 _ATTACH_TEXT_MIMES = {
     "text/plain", "text/markdown", "text/x-markdown", "text/html", "text/csv",
     "text/tab-separated-values", "application/json", "application/xml", "text/xml",
     "text/yaml", "application/yaml", "text/x-log",
 }
 _ATTACH_TEXT_EXTS = {"txt", "md", "markdown", "csv", "json", "xml", "yaml", "yml", "log", "html"}
+_ATTACH_PDF_MIMES = {"application/pdf"}
+_ATTACH_PDF_EXTS = {"pdf"}
 _ATTACH_MAX_CHARS = 2 * 1024 * 1024  # pro Anhang
+_ATTACH_PDF_MAX_CHARS = 40_000
+
+
+def _extract_pdf_text_from_bytes(raw_bytes, name="anhang.pdf"):
+    """Extrahiert Text aus PDF-Bytes via pdftotext (temp file). Graceful None."""
+    import shutil
+    import subprocess
+    import tempfile
+
+    bin_path = (
+        os.environ.get("PDFTOTEXT_BIN")
+        or shutil.which("pdftotext")
+        or ("/opt/homebrew/bin/pdftotext" if os.path.isfile("/opt/homebrew/bin/pdftotext") else None)
+        or ("/usr/local/bin/pdftotext" if os.path.isfile("/usr/local/bin/pdftotext") else None)
+    )
+    if not bin_path or not os.access(bin_path, os.X_OK):
+        return None, "pdftotext fehlt"
+    if not raw_bytes:
+        return None, "leer"
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            tmp.write(raw_bytes)
+            tmp_path = tmp.name
+        try:
+            proc = subprocess.run(
+                [bin_path, "-layout", "-enc", "UTF-8", tmp_path, "-"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        if proc.returncode != 0:
+            return None, (proc.stderr or "pdftotext Fehler")[:200]
+        text = (proc.stdout or "")[:_ATTACH_PDF_MAX_CHARS]
+        if not text.strip():
+            return None, "kein Text extrahiert"
+        return text, None
+    except Exception as e:
+        return None, str(e)[:200]
 
 
 def _embed_attachments(message, attachments):
-    """Bettet Textanhänge sicher in die Nachricht ein (rückwärtskompatibel).
-    Nur Text-MIMEs/ext; Binär/Bild wird NICHT eingepackt (nur Hinweis).
+    """Bettet Text- und PDF-Anhänge sicher in die Nachricht ein.
+    Text-MIMEs/ext direkt; PDF via pdftotext wenn möglich, sonst Hinweis.
     Liefert die (ggf. erweiterte) message."""
-    import os
+    import base64
     if not attachments:
         return message or ""
     parts = [message] if (message and message.strip()) else []
@@ -63,7 +109,42 @@ def _embed_attachments(message, attachments):
         mime = str(att.get("mime") or "").lower()
         content = att.get("content") or ""
         ext = name.lower().rsplit(".", 1)[-1] if "." in name else ""
-        is_text = mime in _ATTACH_TEXT_MIMES or (not mime and ext in _ATTACH_TEXT_EXTS) or (mime == "application/octet-stream" and ext in _ATTACH_TEXT_EXTS)
+        is_text = (
+            mime in _ATTACH_TEXT_MIMES
+            or (not mime and ext in _ATTACH_TEXT_EXTS)
+            or (mime == "application/octet-stream" and ext in _ATTACH_TEXT_EXTS)
+        )
+        is_pdf = mime in _ATTACH_PDF_MIMES or ext in _ATTACH_PDF_EXTS
+
+        if is_pdf and not is_text:
+            # content: Bytes, base64, Roh-%PDF, oder bereits extrahierter Text
+            text = None
+            err = None
+            enc = str(att.get("encoding") or "").lower()
+            if isinstance(content, (bytes, bytearray)):
+                text, err = _extract_pdf_text_from_bytes(bytes(content), name)
+            elif not str(content).strip():
+                err = "leer"
+            elif enc in ("base64", "b64") or str(content)[:8].startswith("JVBERi"):
+                try:
+                    raw = base64.b64decode(str(content), validate=False)
+                    text, err = _extract_pdf_text_from_bytes(raw, name)
+                except Exception as e:
+                    err = f"base64: {e}"
+            elif str(content).lstrip().startswith("%PDF"):
+                text, err = _extract_pdf_text_from_bytes(
+                    str(content).encode("latin-1", errors="replace"), name
+                )
+            else:
+                # Client hat Text bereits extrahiert
+                text = str(content)[:_ATTACH_PDF_MAX_CHARS]
+
+            if text and str(text).strip():
+                parts.append(f"[Anhang PDF: {name}]\n{text}\n[Ende Anhang: {name}]")
+            else:
+                skipped.append(f"{name} (PDF nicht lesbar: {err or 'unbekannt'})")
+            continue
+
         if not is_text:
             skipped.append(f"{name} (kein erlaubter Text-Typ: {mime or 'unbekannt'})")
             continue
@@ -74,8 +155,50 @@ def _embed_attachments(message, attachments):
             raise ValueError(f"Textanhang zu groß: {name} (> {_ATTACH_MAX_CHARS} Zeichen)")
         parts.append(f"[Anhang: {name}]\n{content}\n[Ende Anhang: {name}]")
     if skipped:
-        parts.append("[Übergangen (Stufe 1): " + "; ".join(skipped) + "]")
+        parts.append("[Übergangen: " + "; ".join(skipped) + "]")
     return "\n\n".join(parts) if parts else (message or "")
+
+
+def _normalize_images(raw):
+    """OpenAI image_url-Parts aus POST /chat.images (Whitelist png/jpeg/webp/gif)."""
+    if not raw:
+        return []
+    allowed = {"image/png", "image/jpeg", "image/webp", "image/gif"}
+    out = []
+    for img in raw if isinstance(raw, list) else []:
+        if not isinstance(img, dict):
+            continue
+        if img.get("type") == "image_url" and isinstance(img.get("image_url"), dict):
+            url = str(img["image_url"].get("url") or "")
+            if not url.startswith("data:image/"):
+                continue
+            # data:image/png;base64,...
+            try:
+                header = url.split(",", 1)[0]
+                mime = header.split(";")[0].split(":", 1)[1].lower()
+            except Exception:
+                continue
+            if mime == "image/jpg":
+                mime = "image/jpeg"
+            if mime not in allowed:
+                continue
+            out.append({"type": "image_url", "image_url": {"url": url}})
+            continue
+        mime = str(img.get("mime") or img.get("mimeType") or "").lower()
+        data = img.get("data") or img.get("content") or ""
+        if mime == "image/jpg":
+            mime = "image/jpeg"
+        if mime not in allowed or not data:
+            continue
+        data = str(data)
+        if data.startswith("data:"):
+            out.append({"type": "image_url", "image_url": {"url": data}})
+        else:
+            out.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{data}"},
+            })
+    return out[:8]  # hard cap (matches UI MAX_ATTACHMENTS)
 
 
 def _handle_chat(payload, send=None):
@@ -89,12 +212,13 @@ def _handle_chat(payload, send=None):
     """
     message = (payload or {}).get("message", "")
     attachments = (payload or {}).get("attachments")
+    images = _normalize_images((payload or {}).get("images"))
     # Textanhänge in die Nachricht einbetten (deutlich gekennzeichnet),
     # damit das Modell den Inhalt als Kontext bekommt.
     message = _embed_attachments(message, attachments)
     # Resume nach Glyph-Genehmigung darf ohne neue message laufen.
     is_resume = bool((payload or {}).get("resume_token"))
-    if not message.strip() and not is_resume:
+    if not message.strip() and not images and not is_resume:
         err = {"ok": False, "answer": "Leere Nachricht.", "rounds": 0, "tool_calls": []}
         if send:
             send({"type": "done", **err})
@@ -118,7 +242,12 @@ def _handle_chat(payload, send=None):
             "Bei Modell-Fragen: nenne openai/gpt-5.6-luna, kein Wiki/Tool nötig."
         )
         try:
-            answer = _llm.chat(system, message)
+            if images:
+                from core.providers.openrouter import user_content_with_images
+                user_payload = user_content_with_images(message, images)
+            else:
+                user_payload = message
+            answer = _llm.chat(system, user_payload)
             res = {"ok": True, "answer": answer, "rounds": 1, "tool_calls": [], "chat_mode": "openrouter-chat"}
             if send:
                 send({"type": "done", **res})
@@ -156,6 +285,7 @@ def _handle_chat(payload, send=None):
             on_event=on_event,
             resume_token=resume_token,
             allow_pending=allow_pending,
+            images=images,
         )
         p = llm.get_provider()
         used_model = (
@@ -177,7 +307,7 @@ def _handle_chat(payload, send=None):
         return result
 
     # Agentenmodus: kontrollierter Tool-Loop mit Bestätigung für Schreib-Tools.
-    result = tool_loop.run(message, confirm=confirm, on_event=on_event)
+    result = tool_loop.run(message, confirm=confirm, on_event=on_event, images=images)
     # Modell-Info anhängen (Primär Luna oder Free-Fallback).
     p = llm.get_provider()
     used_model = getattr(p, "_active_model", None) or p.model_name

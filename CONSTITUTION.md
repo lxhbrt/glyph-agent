@@ -18,8 +18,8 @@ Nutzerfrage
 | **Gedächtnis / Suche** | lokal: bge-m3 + Keyword, Vault-Tools | Cloud-Embeddings |
 | **Denken / Antwort** | OpenRouter `openai/gpt-5.6-luna` → free | lokaler Chat |
 | **UI / Build** | Glyph-UI: **Grok** = Build | Profile verwechseln |
-| **UI / Code** | Glyph-UI: **`^_Code`** = DeepSeek V4 Flash via OpenRouter + Workspace-Tools (Read/Write/Shell-Whitelist), Genehmigung in Glyph | Claude OAuth / Shell im Vault-Agent |
-| **UI / Vault** | Glyph-UI: **glyph-agent** = Vault/Tools + Cloud-Antwort (kein Shell) | Code-Schreiben außerhalb Vault |
+| **UI / Code** | Glyph-UI: **`^_Code`** = DeepSeek V4 Flash via OpenRouter + Workspace-Tools (ListDir/Read/Grep/SearchReplace/Write/Shell-Whitelist), Genehmigung in Glyph | Claude OAuth / Shell im Vault-Agent |
+| **UI / Vault** | Glyph-UI: **°_Agent** (id glyph-agent) = Vault/Wiki/Web/PDF/Mail + Cloud-Antwort (**kein Shell**) | Code-Schreiben außerhalb Vault |
 
 Ollama bleibt **nur** für lokale Embeddings (`bge-m3`), nicht als Antwort-KI.  
 **Kein** lokaler Chat-Fallback. Wenn Luna und Free scheitern: harter Fehler.
@@ -37,19 +37,21 @@ Ollama bleibt **nur** für lokale Embeddings (`bge-m3`), nicht als Antwort-KI.
 | Stufe | Werkzeug | Wann |
 |-------|----------|------|
 | **Grob** | Exa (`WebSearch`, source=exa) | Übersicht, Preise, Normen, „aktuell“ |
-| **Fein** | TinyFish (`ExtractUrl` / `FetchUrl`) | konkrete URL, Tabellen, JS-Seiten |
+| **Fein** | TinyFish (`ExtractUrl` / `FetchUrl` / `BrowseUrl`) | konkrete URL, Tabellen, JS-Seiten, Kurz-Summary |
 
 ## Finde-Werkzeug
 
 **Ein** Tool nach außen: `VaultFind`  
 Intern hybrid: **0.7 Embedding + 0.3 Keyword** (OpenClaw-Vorbild).  
-Alte Namen `VaultRecall` / `VaultSearch` bleiben als Aliase, rufen dasselbe auf.
+Aliase: `VaultRecall` / `VaultSearch` / `WikiSearch` rufen dasselbe auf.  
+Weitere Agent-Tools: `WikiGet`/`WikiApply`/`WikiStatus`, `ReadPdf`, `MailList`/`MailRead`, `MessageSend` (write+confirm).
 
 ## Eiserne Regel (vom Nutzer)
 
 - **Keine** eigenmächtigen Config-/Provider-Experimente.
 - Verbesserungen **vorschlagen** ist erwünscht; umsetzen erst nach Auftrag.
 - Vorgaben 1:1; bei Unsicherheit nachfragen.
+- **Nutzerantworten: stop-slop (immer)** — Kern zuerst, kein Fülltext, keine erfundenen Normen/Fakten.
 
 ## Identität (Self-ID) — freistil
 
