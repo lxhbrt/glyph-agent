@@ -33,7 +33,15 @@ _SKIP_DIR_NAMES = {
 
 
 def workspace_roots():
-    """Kanonische erlaubte Roots (realpath) — nur existierende Dirs."""
+    """Kanonische erlaubte Roots (realpath) — SoT workspaces.json, Fallback Env/Config."""
+    if getattr(config, "CODE_WORKSPACES_USE_REGISTRY", True):
+        try:
+            from . import workspaces_registry as wr
+            roots = wr.accessible_roots()
+            if roots:
+                return list(roots)
+        except Exception:
+            pass
     roots = []
     seen = set()
     for r in getattr(config, "CODE_WORKSPACE_ROOTS", []) or []:
@@ -54,33 +62,68 @@ def workspace_roots():
     return roots
 
 
+def _ordered_roots():
+    """Primary first, then remaining accessible roots."""
+    roots = workspace_roots()
+    if not roots:
+        return []
+    primary = None
+    if getattr(config, "CODE_WORKSPACES_USE_REGISTRY", True):
+        try:
+            from . import workspaces_registry as wr
+            primary = wr.primary_root()
+        except Exception:
+            primary = None
+    if primary and primary in roots:
+        return [primary] + [r for r in roots if r != primary]
+    return list(roots)
+
+
 def _resolve_path(path):
     """
     Löst path relativ zu einem Workspace-Root auf.
     Absoluter Pfad: muss unter einem Root liegen.
-    Relativer Pfad: erster Root, der den Pfad enthält / join mit erstem Root.
+    Relativer Pfad: Primary-Root zuerst, dann übrige.
     Liefert (abs_path, root) oder (None, None).
     """
     if path is None or str(path).strip() == "":
         return None, None
     raw = str(path).strip()
-    roots = workspace_roots()
+    roots = _ordered_roots()
     if not roots:
         return None, None
 
     if os.path.isabs(raw):
         cand = os.path.realpath(raw)
+        # longest matching root wins
+        best = None
+        best_len = -1
         for root in roots:
             if cand == root or cand.startswith(root + os.sep):
-                return cand, root
-        return None, None
+                if len(root) > best_len:
+                    best = (cand, root)
+                    best_len = len(root)
+        return best if best else (None, None)
 
-    # Relativ: unter dem ersten Root (oder dem, der als Prefix passt)
+    # Relativ: Primary zuerst
     for root in roots:
         cand = os.path.realpath(os.path.join(root, raw))
         if cand == root or cand.startswith(root + os.sep):
             return cand, root
     return None, None
+
+
+def mode_for_resolved(root):
+    """Workspace-Mode für ein Root: r | rw | private | None."""
+    if not root:
+        return None
+    if not getattr(config, "CODE_WORKSPACES_USE_REGISTRY", True):
+        return "rw"  # Tests / Legacy-Config: r+w
+    try:
+        from . import workspaces_registry as wr
+        return wr.mode_for_root(root) or "r"
+    except Exception:
+        return "rw"
 
 
 def _rel_display(abs_path, root):
@@ -461,11 +504,17 @@ def propose_write(path, content):
 def write_file(path, content):
     """
     Schreibt Datei mit Backup (wie Vault ApplyEdit, aber Workspace-Roots).
-    Kein Löschen, kein Umbenennen.
+    Kein Löschen, kein Umbenennen. Nur Workspace-Mode r+w.
     """
     abs_path, root = _resolve_path(path)
     if not abs_path:
         raise ValueError(f"Pfad außerhalb der Workspace-Roots: {path}")
+    mode = mode_for_resolved(root)
+    if mode != "rw":
+        raise ValueError(
+            f"Schreiben verboten: Workspace-Mode ist {mode or '?'} "
+            f"(braucht r+w) — Root {root}"
+        )
     content = content if content is not None else ""
     raw = str(content).encode("utf-8")
     if len(raw) > _MAX_WRITE_BYTES:
@@ -529,8 +578,8 @@ def write_file(path, content):
 
 # --- Shell ---
 
-# Explizit verbotene Muster (auch wenn Whitelist greifen würde)
-_DENY_PATTERNS = [
+# Hart verboten — nie, auch nicht nach Elevated-Freigabe
+_HARD_DENY_PATTERNS = [
     r"\brm\b",
     r"\bmv\b",
     r"\bchmod\b",
@@ -552,13 +601,20 @@ _DENY_PATTERNS = [
     r"\bosascript\b",
     r"`",
     r"\$\(",
-    r"&&\s*rm\b",
-    r";\s*rm\b",
-    r"\|\s*rm\b",
-    # git push/pull/fetch nie erlauben (auch nicht über erweiterte Whitelist)
-    r"\bgit\s+push\b",
-    r"\bgit\s+pull\b",
-    r"\bgit\s+fetch\b",
+]
+
+# Elevated: Popup (Einmal), dann ausführen — inkl. Compound und git push
+_ELEVATED_PATTERNS = [
+    (r"\bgit\s+push\b", "git push — schreibt Remote"),
+    (r"\bgit\s+pull\b", "git pull — ändert lokalen Stand vom Remote"),
+    (r"\bgit\s+fetch\b", "git fetch — holt Remote-Refs"),
+    (r"^npm\s+run\s+service(:|\b)", "npm run service:* — LaunchAgent/Service"),
+    (r"(?:&&|\|\||[;|])", "Compound/Pipe (&& ; | ||)"),
+]
+
+# Legacy alias for tests
+_DENY_PATTERNS = list(_HARD_DENY_PATTERNS) + [
+    r"\bgit\s+push\b",  # still "denied" without elevated_ok via classify
 ]
 
 
@@ -566,75 +622,107 @@ def _default_allow_patterns():
     return list(getattr(config, "CODE_SHELL_ALLOW", None) or [])
 
 
-def shell_allowed(command):
-    """True, wenn command die Whitelist passiert und kein Deny greift."""
+def shell_classify(command):
+    """
+    Klassifiziert Shell-Befehl.
+    Returns: (kind, reason)
+      kind: "allow" | "elevated" | "deny"
+      reason: human-readable (risk line or deny reason)
+    """
     cmd = (command or "").strip()
     if not cmd:
-        return False, "leerer Befehl"
+        return "deny", "leerer Befehl"
     if len(cmd) > 2000:
-        return False, "Befehl zu lang"
+        return "deny", "Befehl zu lang"
     if "\n" in cmd or "\r" in cmd:
-        return False, "Mehrzeilige Befehle verboten"
-    low = cmd.lower()
-    for pat in _DENY_PATTERNS:
+        return "deny", "Mehrzeilige Befehle verboten"
+    for pat in _HARD_DENY_PATTERNS:
         if re.search(pat, cmd, re.IGNORECASE):
-            return False, f"verbotenes Muster: {pat}"
+            return "deny", f"hart verboten: {pat}"
+    for pat, risk in _ELEVATED_PATTERNS:
+        if re.search(pat, cmd, re.IGNORECASE):
+            return "elevated", risk
     allows = _default_allow_patterns()
     if not allows:
-        return False, "keine Shell-Whitelist konfiguriert"
+        return "deny", "keine Shell-Whitelist konfiguriert"
     for pat in allows:
         try:
             if re.search(pat, cmd):
-                return True, None
+                return "allow", None
         except re.error:
             continue
-    return False, "nicht in der Shell-Whitelist"
+    return "deny", "nicht in der Shell-Whitelist"
 
 
-def run_command(command, cwd=None, timeout=None):
+def shell_allowed(command, *, allow_elevated=False):
+    """True, wenn command freigegeben werden darf (Whitelist oder elevated+Flag)."""
+    kind, reason = shell_classify(command)
+    if kind == "allow":
+        return True, None
+    if kind == "elevated":
+        if allow_elevated:
+            return True, None
+        return False, f"Elevated-Freigabe nötig: {reason}"
+    return False, reason
+
+
+def run_command(command, cwd=None, timeout=None, allow_elevated=False):
     """
-    Führt einen Whitelist-Befehl unter einem Workspace-Root aus.
-    shell=False mit shlex.split; kein bare shell=True.
+    Führt Shell unter Workspace-Root aus.
+    Whitelist: shlex.split (shell=False).
+    Elevated Compound: bash -lc nach Freigabe (Hard-Deny gilt weiter).
     """
-    ok, reason = shell_allowed(command)
-    if not ok:
+    kind, reason = shell_classify(command)
+    if kind == "deny":
         raise ValueError(f"Shell abgelehnt: {reason}")
+    if kind == "elevated" and not allow_elevated:
+        raise ValueError(f"Shell abgelehnt: Elevated-Freigabe nötig: {reason}")
 
-    roots = workspace_roots()
+    roots = _ordered_roots()
     if not roots:
-        raise ValueError("Keine CODE_WORKSPACE_ROOTS konfiguriert")
+        raise ValueError("Keine Workspace-Roots konfiguriert")
 
     work = cwd or roots[0]
     abs_cwd, root = _resolve_path(work)
     if not abs_cwd or not os.path.isdir(abs_cwd):
-        # fallback: first root
         abs_cwd, root = roots[0], roots[0]
         if cwd:
             raise ValueError(f"cwd außerhalb Workspace-Roots: {cwd}")
 
+    mode = mode_for_resolved(root)
+    if mode != "rw":
+        raise ValueError(
+            f"Shell verboten: Workspace-Mode ist {mode or '?'} (braucht r+w)"
+        )
+
     timeout_s = int(timeout or getattr(config, "CODE_SHELL_TIMEOUT", 60) or 60)
     timeout_s = max(1, min(timeout_s, 120))
 
-    try:
-        argv = shlex.split(command)
-    except ValueError as e:
-        raise ValueError(f"Befehl nicht parsbar: {e}") from e
-    if not argv:
-        raise ValueError("leerer Befehl")
-
-    # Nur erlaubte Binaries: erstes Token muss basename matchen (kein /usr/bin/rm-Escape
-    # über absolute Pfade außerhalb) — absolute Pfade nur wenn Binary-Name whitelisted.
-    bin_name = os.path.basename(argv[0])
-    # Re-check allow on reconstructed simple form for basename
-    ok2, reason2 = shell_allowed(command)
-    if not ok2:
-        raise ValueError(f"Shell abgelehnt: {reason2}")
+    use_shell = kind == "elevated" and bool(
+        re.search(r"(?:&&|\|\||[;|])", (command or "").strip())
+    )
+    if use_shell:
+        argv = ["bash", "-lc", command]
+        bin_name = "bash"
+    else:
+        try:
+            argv = shlex.split(command)
+        except ValueError as e:
+            raise ValueError(f"Befehl nicht parsbar: {e}") from e
+        if not argv:
+            raise ValueError("leerer Befehl")
+        bin_name = os.path.basename(argv[0])
 
     env = os.environ.copy()
-    # Keine Secrets-Expansion erzwingen — PATH behalten, aber HOME ok
     env["LANG"] = env.get("LANG") or "en_US.UTF-8"
 
-    log.log("code_run_command", cmd=command[:200], cwd=_rel_display(abs_cwd, root))
+    log.log(
+        "code_run_command",
+        cmd=command[:200],
+        cwd=_rel_display(abs_cwd, root),
+        elevated=bool(allow_elevated and kind == "elevated"),
+        shell_lc=use_shell,
+    )
     try:
         proc = subprocess.run(
             argv,
@@ -655,6 +743,7 @@ def run_command(command, cwd=None, timeout=None):
             "stdout": out[:_MAX_CMD_OUTPUT],
             "stderr": err[:_MAX_CMD_OUTPUT],
             "timeout": True,
+            "elevated": kind == "elevated",
         }
     except FileNotFoundError:
         raise ValueError(f"Befehl nicht gefunden: {bin_name}") from None
@@ -670,6 +759,139 @@ def run_command(command, cwd=None, timeout=None):
         "timeout": False,
         "truncated": len(proc.stdout or "") > _MAX_CMD_OUTPUT
         or len(proc.stderr or "") > _MAX_CMD_OUTPUT,
+        "elevated": kind == "elevated",
+    }
+
+
+def permission_decision(tool_name, args):
+    """
+    Policy für ^_Code-Tools.
+    Returns dict:
+      action: "allow" | "confirm" | "deny"
+      reason: str
+      elevated: bool
+      risk: str
+      preview: str
+    """
+    args = args or {}
+    name = tool_name or ""
+
+    if name in ("ListDir", "ReadFile", "Grep"):
+        path = args.get("path") or "."
+        abs_path, root = _resolve_path(path)
+        if not abs_path:
+            return {
+                "action": "deny",
+                "reason": f"Pfad außerhalb der Workspace-Roots: {path}",
+                "elevated": False,
+                "risk": "",
+                "preview": "",
+            }
+        return {
+            "action": "allow",
+            "reason": "",
+            "elevated": False,
+            "risk": "",
+            "preview": "",
+        }
+
+    if name in ("WriteFile", "SearchReplace"):
+        path = args.get("path")
+        abs_path, root = _resolve_path(path)
+        if not abs_path:
+            return {
+                "action": "deny",
+                "reason": f"Pfad außerhalb der Workspace-Roots: {path}",
+                "elevated": False,
+                "risk": "",
+                "preview": preview_for_confirm(name, args),
+            }
+        mode = mode_for_resolved(root)
+        if mode == "rw":
+            return {
+                "action": "allow",
+                "reason": "Workspace r+w — Write ohne Popup",
+                "elevated": False,
+                "risk": "",
+                "preview": preview_for_confirm(name, args),
+            }
+        return {
+            "action": "deny",
+            "reason": (
+                f"Schreiben verboten: Mode {mode or '?'} "
+                f"(braucht r+w) — {root}"
+            ),
+            "elevated": False,
+            "risk": "",
+            "preview": preview_for_confirm(name, args),
+        }
+
+    if name == "RunCommand":
+        cmd = args.get("command") or ""
+        cwd = args.get("cwd") or "."
+        abs_cwd, root = _resolve_path(cwd)
+        if not abs_cwd:
+            roots = _ordered_roots()
+            if not roots:
+                return {
+                    "action": "deny",
+                    "reason": "Keine Workspace-Roots",
+                    "elevated": False,
+                    "risk": "",
+                    "preview": preview_for_confirm(name, args),
+                }
+            abs_cwd, root = roots[0], roots[0]
+        mode = mode_for_resolved(root)
+        if mode != "rw":
+            return {
+                "action": "deny",
+                "reason": f"Shell verboten: Mode {mode or '?'} (braucht r+w)",
+                "elevated": False,
+                "risk": "",
+                "preview": preview_for_confirm(name, args),
+            }
+        kind, reason = shell_classify(cmd)
+        preview = preview_for_confirm(name, args)
+        if kind == "deny":
+            return {
+                "action": "deny",
+                "reason": f"Shell abgelehnt: {reason}",
+                "elevated": False,
+                "risk": "",
+                "preview": preview,
+            }
+        if kind == "elevated":
+            risk = reason or "Elevated Shell"
+            return {
+                "action": "confirm",
+                "reason": risk,
+                "elevated": True,
+                "risk": risk,
+                "preview": f"⚠ {risk}\n\n{preview}",
+            }
+        return {
+            "action": "allow",
+            "reason": "Whitelist-Shell unter r+w",
+            "elevated": False,
+            "risk": "",
+            "preview": preview,
+        }
+
+    # Unknown write-ish: confirm
+    if name:
+        return {
+            "action": "confirm",
+            "reason": "unbekanntes Tool",
+            "elevated": False,
+            "risk": "",
+            "preview": preview_for_confirm(name, args),
+        }
+    return {
+        "action": "deny",
+        "reason": "leeres Tool",
+        "elevated": False,
+        "risk": "",
+        "preview": "",
     }
 
 
@@ -695,5 +917,9 @@ def preview_for_confirm(tool_name, args):
             f"+++ new ---\n{preview_new}"
         )
     if tool_name == "RunCommand":
-        return f"RunCommand → {args.get('command')}\ncwd={args.get('cwd') or '.'}"
+        kind, risk = shell_classify(args.get("command") or "")
+        base = f"RunCommand → {args.get('command')}\ncwd={args.get('cwd') or '.'}"
+        if kind == "elevated" and risk:
+            return f"⚠ {risk}\n{base}"
+        return base
     return f"{tool_name}: {args}"

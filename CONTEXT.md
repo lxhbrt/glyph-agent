@@ -37,8 +37,59 @@ _Avoid_: „3-Stufen-Fallback“ / lokaler Chat-Fallback (existiert nicht mehr; 
 
 - **glyph-agent Default** bleibt **Vault-only** (kein Shell, kein allgemeines Repo-Schreiben).
 - **`MODE=code`** (per Request `mode: "code"`): ^_Code-Pfad — Tools `ListDir` / `ReadFile` / `Grep` / `SearchReplace` / `WriteFile` / `RunCommand`, Denker `CODE_OPENROUTER_MODEL` (Default `deepseek/deepseek-v4-flash-0731`).
-- Write/Shell brauchen **Glyph-Genehmigung** (`pending_confirmation` + `resume_token`); nie auto-approve.
-- Shell: Whitelist + Deny-Liste + Timeout + nur `CODE_WORKSPACE_ROOTS` (Default: glyph-ui, glyph-agent, `~/.openclaw/workspace`; optional `~/grok-chat-ui` wenn vorhanden; nur existierende Dirs).
+- **Workspaces-SoT:** `~/.glyph/workspaces.json` (Modes `r` / `rw` / `private`); Registry `core/workspaces_registry.py`. Fallback: `CODE_WORKSPACE_ROOTS`.
+- Write/SearchReplace unter **`r+w` ohne Popup**. Whitelist-Shell unter `r+w` ohne Popup.
+- **Elevated** braucht Glyph-Popup (`pending_confirmation` + `resume_token`): `git push|pull|fetch`, Compound, `npm run service:*`. Kein Session-Always für elevated.
+- Fail nach Allow / unter r+w: **hard_error** + Banner (echter Grund). Hart-Deny: `rm`/`sudo`/… bleibt tot.
+- Shell: Whitelist + Hard-Deny + Elevated-Klassifikation + Timeout; nur angebundene Roots.
+
+## Settled decisions (Wiederkehrende To-dos 2026-08-08)
+
+- **SoT:** `jobs/recurring.json` + `core/recurring.py`. UI: Glyph Kalender → Tab **Plan**.
+- Schema: title, prompt, schedule daily|weekly (Europe/Berlin), paused, allow_write, last_*.
+- Ausführen: Freitext → tool_loop; allow_write → Auto-Confirm nur HSEQ-Pfade. Globaler Job-Lock.
+- Scheduler: `POST /recurring/run-due` via `jobs-catchup.sh` (15 Min). **Zusätzlich einmal beim Agent-Start** (Hintergrund-Thread, ~2s Delay; Catch-up-Plist kann vor dem Agent laufen). Keine Plist pro To-do.
+- Migration: 3 HSEQ-Seeds (`td-eingang` 18:00, `td-handover` 18:30, `td-lernen` Fr 19:00).
+- Fertig: last_status=ok → UI „Fertig“ klickbar löscht To-do. Events → Systemzeile in Glyph-UI.
+- ACP-Plan-Leiste bleibt getrennt (Session).
+
+## Settled decisions (Second-Brain Gaps 2026-08-09)
+
+- Pro-Vault-Vertrag: `HSEQ Sync/AGENTS.md`; Wiki: erweiterte `memory-wiki/AGENTS.md` (Ingest ≥1 Synthese-Seite).
+- Skills: `vault-ingest`, `merken` (+ bestehende hseq-*); IDs Alias `hseq-*` = recurring `td-*`.
+- Handover: Pflicht-**3-Zeilen-Briefing** (Neu / Offen / Konflikt-Stale); Eingang+Log = Beleg, nicht Offen.
+- Index: `_is_blocked` + Hygiene blocken heikle Privat-/Behörden-Pfadmuster (nicht alle `unsafe-local-*`).
+- Privat bleibt außerhalb `VAULT_PATHS` (Red Line).
+
+## Settled decisions (Shared SoT alle Profile 2026-08-09)
+
+- **Eine** Querschnitts-Wahrheit: `~/.glyph/AGENTS.md` — Grok, ^_Code, °_Agent.
+- Skills gemeinsam: `~/.glyph/skills/` (Glyph-UI `skillRootsForProfile` für alle Profile).
+- Grok: `~/.grok/rules/glyph-shared.md`. Agent/Code: Prompt-Injection der SoT-Datei.
+- Nutzer muss Geklärtes nicht pro Profil neu erzählen.
+
+## Settled decisions (zentrale Memory 2026-08-09)
+
+- **Memory:** `~/.glyph/MEMORY.md` (kuratiert: Resümee + Lektionen aus Fehlern).
+- Nicht unter OpenClaw; Stub + Backup unter `~/.openclaw/workspace/MEMORY.md*`.
+- Tages-Archiv: `~/.glyph/memory/openclaw-dailies/` → alte OpenClaw-Dailies.
+- Glyph übernimmt Operatives; OpenClaw Auslauf (Rest-Crons 03:00/06:00 bis Ersatz).
+
+## Settled decisions (^_Code Workspaces Phase 1 — 2026-08-11)
+
+- **Problem:** Allow + Fail — Code fragt freigeben, setzt aber nichts um.
+- **Capability first** (Phase 1), Kabelsalat-UI Workspaces = Phase 2.
+- SoT `~/.glyph/workspaces.json`; nur Profil **`^_Code`** (Grok unberührt).
+- Defaults: glyph-ui + glyph-agent = `r+w`; openclaw-workspace = `r`.
+- Write flüssig unter r+w; Popup nur elevated; hart-deny bleibt; Fail = hard stop + Banner.
+
+## Settled decisions (^_Code Workspaces Phase 2 — 2026-08-11)
+
+- Kabelsalat-UI analog Vaults: Buch → Tab **Workspaces**, Hub `^_Code`.
+- API: `GET|POST /workspaces`, `PATCH|DELETE /workspaces/<id>` → Registry CRUD.
+- UI-Proxy: glyph-ui `/api/workspaces` → Agent.
+- Modes: `r` · `rw` · `private` (UI: gesperrt). Keine Pins, kein Obsidian-URI.
+- Anbinden: existierendes Verzeichnis (Pfad oder Name unter `$HOME`).
 
 ## Settled decisions (Vault-Inventar 2026-08-08)
 

@@ -191,7 +191,16 @@ def build_index_from_vault(vault_path=None, quiet=False):
     from . import vault_tools as _vt
 
     roots = [vault_path] if vault_path else list(getattr(_config, "VAULT_PATHS", [_config.VAULT_PATH]))
-    roots = [_os.path.realpath(r) for r in roots]
+    roots = [_os.path.realpath(r) for r in roots if r]
+    # Private vaults: lesbar per ReadNote, aber nicht in Embedding-Index
+    try:
+        from . import vaults_registry as _vr
+
+        priv = { _os.path.realpath(p) for p in _vr.private_paths() }
+        if not vault_path:
+            roots = [r for r in roots if r not in priv]
+    except Exception:
+        pass
     invalid = [r for r in roots if not _os.path.isdir(r)]
     if invalid:
         return {"error": f"Vault-Pfad nicht gefunden: {invalid}"}

@@ -1,0 +1,90 @@
+{
+  "version": 1,
+  "migrated_hseq_v1": true,
+  "items": [
+    {
+      "id": "td-eingang",
+      "title": "HSEQ Eingang → Fertig",
+      "prompt": "HSEQ-Tagesprüfung (glyph-agent). Öffne und führe den Abschnitt 'Automatische Tagesprüfung' aus der Datei '/Users/lxndrhbrt/ObsidianVaults/HSEQ Sync/Vorlagen/Audit/Prompt - Auditnotizen auswerten und Auditbericht.md' vollständig aus.\n\nEingang prüfen, VORLAGE-Dateien, SHA-256 gegen Verarbeitungslog, Berichte nur in Fertig/. Keine Personennamen. Rohnotizen nicht ändern. Absolute Pfade unter /Users/lxndrhbrt/ObsidianVaults/HSEQ Sync/. Nichts zu tun → 'HSEQ: keine Änderungen'. Selbstständig, keine Rückfragen.",
+      "schedule": {
+        "kind": "daily",
+        "time": "18:00"
+      },
+      "paused": false,
+      "allow_write": true,
+      "created_at": "2026-08-08T23:03:05+02:00",
+      "last_run_at": "2026-08-11T21:39:31+02:00",
+      "last_status": "ok",
+      "last_answer_preview": "Ich führe die Tagesprüfung aus. Zuerst lese ich die vollständige Vorlage, um den Abschnitt „Automatische Tagesprüfung“ zu erhalten.\n\n{\"tool\": \"ReadNote\", \"args\": {\"path\": \"Vorlagen/Audit/Prompt - Auditnotizen auswerten und Auditbericht.md\"}}",
+      "last_stamp": "2026-08-11"
+    },
+    {
+      "id": "td-handover",
+      "title": "HSEQ Handover Daily",
+      "prompt": "HSEQ-Handover. Öffne und führe aus: /Users/lxndrhbrt/ObsidianVaults/HSEQ Sync/Vorlagen/Jobs/PROMPT-Handover.md\nSchreibe nur: /Users/lxndrhbrt/ObsidianVaults/HSEQ Sync/00 Arbeitsfluss/Daily/YYYY-MM-DD.md (heute Europe/Berlin). Quellen: Eingang/, Fertig/, Verarbeitungslog. Daily beginnt mit Briefing 3 Zeilen: Neu / Offen / Konflikt-Stale. Antwort = dieselben 3 Zeilen. Eingang-mit-Log = Beleg, nicht Offen. Keine Personennamen. Alles leer: 'Handover: ruhig (YYYY-MM-DD)' + Briefing mit —. Selbstständig, keine Rückfragen.",
+      "schedule": {
+        "kind": "daily",
+        "time": "18:30"
+      },
+      "paused": false,
+      "allow_write": true,
+      "created_at": "2026-08-08T23:03:05+02:00",
+      "last_run_at": "2026-08-11T21:40:13+02:00",
+      "last_status": "ok",
+      "last_answer_preview": "Neu: —\nOffen: —\nKonflikt/Stale: —\n\nHandover: ruhig (2026-08-11)\n\nDaily geschrieben: `HSEQ Sync/00 Arbeitsfluss/Daily/2026-08-11.md`. Alle 4 Eingangs-Rohnotizen (Rosier Sylt-Tinnum, Hartmann Grevenbroich, Umweltzertifizierung Hartmann, Umweltschutz Senger) haben Log-Treffer im Verarbeitungslog (letzter Lauf 2026-07-20 18:09) — bleiben als Beleg im Eingang, kein To-do-Stapel. Keine neuen Berichte in",
+      "last_stamp": "2026-08-11"
+    },
+    {
+      "id": "td-lernen",
+      "title": "HSEQ Aus Fertig lernen",
+      "prompt": "HSEQ Aus-Fertig-lernen. Öffne und führe aus: /Users/lxndrhbrt/ObsidianVaults/HSEQ Sync/Vorlagen/Jobs/PROMPT-Aus-Fertig-lernen.md\nMaximal EINE kleine Änderung an Vorlage oder Themen-Notiz — oder nichts. Keine neuen Berichte. Nichts: 'Aus Fertig lernen: nichts Neues'. Selbstständig, keine Rückfragen.",
+      "schedule": {
+        "kind": "weekly",
+        "time": "19:00",
+        "weekday": 4
+      },
+      "paused": false,
+      "allow_write": true,
+      "created_at": "2026-08-08T23:03:05+02:00",
+      "last_run_at": "2026-08-09T10:36:11+02:00",
+      "last_status": "ok",
+      "last_answer_preview": "Aus Fertig lernen: nichts Neues\n\nBegründung kurz: Ich habe die beiden letzten Fertig-UWS-Berichte verglichen (Senger 2026-07-15, Hartmann 2026-07-13). Es zeigt sich **kein wiederkehrendes Muster**: Senger ist fast durchgehend „Nein“, Hartmann fast durchgehend „Ja“ — die Abweichungen sind standortspezifisch, keine wiederkehrende Lücke, die eine Vorlagen-Zeile entlasten würde. Die UWS-Vorlage samt M",
+      "last_stamp": "2026-08-09"
+    },
+    {
+      "id": "td-memory",
+      "title": "Memory-Hygiene (Glyph)",
+      "prompt": "(script) memory_hygiene.py — Daily anlegen, MEMORY.md PII-Scan",
+      "schedule": {
+        "kind": "daily",
+        "time": "03:00"
+      },
+      "paused": false,
+      "allow_write": false,
+      "created_at": "2026-08-09T11:33:15+02:00",
+      "last_run_at": "2026-08-11T03:02:46+02:00",
+      "last_status": "ok",
+      "last_answer_preview": "Memory-Hygiene 2026-08-11\nDaily: neu (2026-08-11.md)\nMEMORY PII: 0 → clean",
+      "last_stamp": "2026-08-11",
+      "script": "memory_hygiene.py"
+    },
+    {
+      "id": "td-cleanup",
+      "title": "Session-Cleanup (Legacy OpenClaw)",
+      "prompt": "(script) session_cleanup_legacy.py — nur wenn openclaw CLI da",
+      "schedule": {
+        "kind": "daily",
+        "time": "06:00"
+      },
+      "paused": false,
+      "allow_write": false,
+      "created_at": "2026-08-09T11:33:15+02:00",
+      "last_run_at": "2026-08-11T06:02:58+02:00",
+      "last_status": "ok",
+      "last_answer_preview": "Session-Cleanup 2026-08-11: exit=0\n{\"agentId\": \"main\", \"storePath\": \"/Users/lxndrhbrt/.openclaw/agents/main/sessions/sessions.json\", \"mode\": \"enforce\", \"dryRun\": false, \"beforeCount\": 18, \"afterCount\": 18, \"repaired\": 0, \"missing\": 0, \"dmScopeRetired\": 0, \"modelRunPruned\": 0, \"pruned\": 0, \"capped\": 0, \"unreferencedArtifacts\": {\"scannedFiles\": 259, \"removedFiles\": 0, \"freedBytes\": 0, \"olderThanMs\":",
+      "last_stamp": "2026-08-11",
+      "script": "session_cleanup_legacy.py"
+    }
+  ],
+  "migrated_nightly_v1": true
+}

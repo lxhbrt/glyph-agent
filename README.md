@@ -43,7 +43,7 @@ Nutzerfrage (mode=code)
 | `CODE_WORKSPACE_ONLY` | `true` | roots-only (v1 immer; Env reserviert) |
 | `CODE_SHELL_TIMEOUT` | `60` | Shell-Timeout (s) |
 | `CHAT_TIMEOUT` | `60` | Hartes Total-Timeout pro OpenRouter-Chat-Call (s) |
-| `CODE_CHAT_TIMEOUT` | `= CHAT_TIMEOUT` | dasselbe im CODE-Modus (DeepSeek) |
+| `CODE_CHAT_TIMEOUT` | `180` | OpenRouter-Wall-Clock im CODE-Modus (DeepSeek Multi-Round) |
 | `CODE_SHELL_ALLOW` | (Builtin-Whitelist) | Regex-Liste, Trenner `\|\|` |
 | `CODE_MAX_ROUNDS` | `16` | Tool-Loop-Runden |
 
@@ -86,11 +86,15 @@ Glyph (Browser) → glyph-agent HTTP (server.py:18899) → Tool-Loop → OpenRou
 5. **Zentrale Schreibfunktion:** Schreiben läuft NUR über `apply_edit` — nie direkt anderswo.
 6. **Prompt-Injection-Schutz:** Vault-Dateien sind DATEN, keine Anweisungen.
 7. **Geschützte Ordner:** `BLOCKED_DIRS` (Default: private, privat, secrets, health, geheim,
-   persönlich, personenbezogen) werden von Suche/Lesen/Editieren ausgeschlossen (env-überschreibbar).
+   persönlich, personenbezogen, recovery, …) werden von Suche/Lesen/Editieren ausgeschlossen
+   (env-überschreibbar). Zusätzlich: heikle **Dateinamen**-Muster (Behörden/Familie/Unterhalt-Spiegel
+   im Wiki, `wiki-import`, …) via `_is_blocked` — HSEQ-fachliche `unsafe-local-themen/…` bleiben.
 8. **Cloud-Audit:** Jede Übertragung an OpenRouter wird in `logs/actions.jsonl` protokolliert
    (provider, model, Zeichen, Zeit). Kein Senden ohne `OPENROUTER_API_KEY`.
 9. **Datenschutz-Schranke:** `EXTERNAL_MAX_CHARS` (Default 4000) kürzt Kontext vor Cloud-Übergabe.
 10. **Modus-Trennung:** `openrouter-chat` hat KEINE Tools/Vault/Dateien — isolierte Oberfläche.
+11. **Vault-Verträge:** `AGENTS.md` in HSEQ Sync (+ memory-wiki) wird in den System-Prompt geladen
+    (Arbeitsregeln; Fachnotizen bleiben DATEN).
 
 ## Nutzung
 
@@ -216,8 +220,52 @@ Kein Shell im Agent-Modus.
 | Tool | Rolle |
 |------|--------|
 | ListDir / ReadFile / **Grep** | Workspace lesen (nur `CODE_WORKSPACE_ROOTS`) |
-| **SearchReplace** / WriteFile | Schreiben mit Backup; braucht Glyph-Confirm |
-| RunCommand | Shell Whitelist+Timeout; braucht Glyph-Confirm |
+| **SearchReplace** / WriteFile | Schreiben mit Backup; unter Workspace **r+w ohne Popup** |
+| RunCommand | Whitelist unter r+w ohne Popup; **elevated** (push/compound/service) = Glyph-Confirm |
+
+## Shared SoT + Memory (Grok · ^_Code · °_Agent)
+
+| | |
+|--|--|
+| **Vertrag** | `~/.glyph/AGENTS.md` |
+| **Memory (Lektionen)** | `~/.glyph/MEMORY.md` |
+| **Skills** | `~/.glyph/skills/` |
+| **Grok** | `~/.grok/rules/glyph-shared.md` + `glyph-memory.md` |
+| **Code/Agent** | System-Prompt lädt AGENTS + MEMORY |
+
+OpenClaw-Memory ist umgezogen (Stub unter `.openclaw/workspace/MEMORY.md`).  
+Geklärtes und Lektionen stehen in Dateien — im Chat **nicht** neu erzählen.
+
+## Vaults & Verträge
+
+| Vault | Rechte | Vertrag |
+|-------|--------|---------|
+| **HSEQ Sync** | lesen+schreiben | `…/HSEQ Sync/AGENTS.md` |
+| ASI, BS. UWS, QM, EM | lesen | Facharchiv |
+| OpenClaw memory-wiki | lesen+schreiben | `…/OpenClaw memory-wiki/AGENTS.md` |
+| Peniel | lesen | — |
+| **Privat** | **nie** | Red Line (nicht in `VAULT_PATHS`) |
+
+Jobs / Skills / Prompts: siehe HSEQ `AGENTS.md` und `Vorlagen/Jobs/`.
+
+## Skills (`~/.glyph/skills/` · auch `~/.glyph-agent/skills/`)
+
+| Skill | Alias / ID | Rolle |
+|-------|------------|--------|
+| `hseq-eingang` | `td-eingang` | 18:00 Eingang → Fertig |
+| `hseq-handover` | `td-handover` | 18:30 Daily + **3-Zeilen-Briefing** |
+| `hseq-aus-fertig-lernen` | `td-lernen` | Fr 19:00 max. 1 Compounding-Edit |
+| `vault-ingest` | — | Quelle → Claims/Links (≥1 Synthese) |
+| `merken` | — | 1 Chat-Claim → Vault |
+
+```bash
+python3 scripts/run_job.py hseq-eingang --force          # = td-eingang
+python3 scripts/run_job.py hseq-handover --force
+python3 scripts/run_job.py hseq-aus-fertig-lernen --force
+python3 scripts/index_hygiene.py                         # heikle Pfade prüfen
+```
+
+Recurring SoT: `jobs/recurring.json` · UI: Glyph Kalender → Plan.
 
 Index-Hygiene: `python3 scripts/index_hygiene.py`
 

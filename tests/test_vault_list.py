@@ -184,6 +184,30 @@ class RankingPrefersLiveOverArchive(unittest.TestCase):
                 config.VAULT_PATH = old[0] if old else hseq
 
 
+class VaultPrefixPathResolve(unittest.TestCase):
+    """ReadNote mit Vault-Präfix 'HSEQ Sync/…' muss greifen (Job-Pfade)."""
+
+    def test_prefix_resolve_live_if_present(self):
+        from core import vault_tools, config
+
+        roots = getattr(config, "VAULT_PATHS", [])
+        if not roots:
+            self.skipTest("keine VAULT_PATHS")
+        hseq = None
+        for r in roots:
+            if "HSEQ Sync" in r and os.path.isdir(r):
+                hseq = r
+                break
+        if not hseq:
+            self.skipTest("HSEQ Sync nicht konfiguriert")
+        # relativ ohne Präfix
+        a = vault_tools.read_note("00 Arbeitsfluss/Eingang/README.md")
+        self.assertTrue(a.get("content") is not None or a.get("chars", 0) >= 0)
+        # mit Vault-Präfix (früher: Notiz nicht gefunden)
+        b = vault_tools.read_note("HSEQ Sync/00 Arbeitsfluss/Eingang/README.md")
+        self.assertEqual(a.get("chars"), b.get("chars"))
+
+
 class LiveEingangSmoke(unittest.TestCase):
     """Optional: echter HSEQ-Vault — dynamisch, keine hardcodierte Datumsnummer."""
 

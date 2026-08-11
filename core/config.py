@@ -7,24 +7,28 @@ Nicht in anderen Dateien hart verdrahten — siehe Architektur-Regel.
 """
 import os
 
-# --- Zentrale Pfad-Konfiguration (fest, persönlicher Sandkasten) ---
-# Mehrere Obsidian-Vaults, mit denen der Assistent arbeitet (Recherche + Wiki-Anlage).
-# Reihenfolge = Priorität für Pfad-Auflösung (erster Eintrag ist der 'Haupt'-Vault).
-# Rechte (per Konvention):
-#   - HSEQ Sync            : Lesen + Schreiben (Audits, Maßnahmenpläne)
-#   - ASI, BS. UWS, QM, EM : Lesen (Facharchiv)
-#   - OpenClaw memory-wiki : Lesen + Schreiben (Wiki selbst anlegen/pflegen)
-#   - Peniel               : Lesen (Projekte)
-# AUSGESCHLOSSEN (Red Line, nie automatisch): Privat, _RECOVERY, .obsidian, backups.
+# --- Vault-Pfade (Kabelsalat-SoT: ~/.glyph/vaults.json) ---
+# Live-Liste wird von core.vaults_registry.apply_to_config() gesetzt.
+# Fallback nur bis erster Load (Tests / vor Migration).
 VAULT_PATHS = [
     "/Users/lxndrhbrt/ObsidianVaults/HSEQ Sync",
     "/Users/lxndrhbrt/ObsidianVaults/ASI, BS. UWS, QM, EM",
     "/Users/lxndrhbrt/ObsidianVaults/OpenClaw memory-wiki",
     "/Users/lxndrhbrt/ObsidianVaults/Peniel",
 ]
-
-# Kompatibilitäts-Alias: erster Eintrag ist der primäre Vault (bisherige API nutzt VAULT_PATH).
 VAULT_PATH = VAULT_PATHS[0]
+
+
+def reload_vault_paths():
+    """Hot-Reload aus ~/.glyph/vaults.json (Kabelsalat)."""
+    global VAULT_PATHS, VAULT_PATH
+    try:
+        from . import vaults_registry as _vr
+
+        paths = _vr.apply_to_config()
+        return paths
+    except Exception:
+        return list(VAULT_PATHS)
 
 # Backup-Verzeichnis für Revisionen (vor jeder Schreib-Änderung).
 BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "vault", "backups")
@@ -130,6 +134,10 @@ CODE_WORKSPACE_ROOTS = _filter_existing_roots(_code_root_candidates)
 CODE_WORKSPACE_ONLY = os.environ.get("CODE_WORKSPACE_ONLY", "true").lower() in (
     "1", "true", "yes", "on",
 )
+# SoT ~/.glyph/workspaces.json (Modes r/rw/private). Tests können False setzen.
+CODE_WORKSPACES_USE_REGISTRY = os.environ.get(
+    "CODE_WORKSPACES_USE_REGISTRY", "true"
+).lower() in ("1", "true", "yes", "on")
 CODE_BACKUP_DIR = os.environ.get(
     "CODE_BACKUP_DIR",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "vault", "code_backups"),
@@ -138,8 +146,9 @@ CODE_SHELL_TIMEOUT = int(os.environ.get("CODE_SHELL_TIMEOUT", "60"))
 # Hartes Total-Timeout für OpenRouter-Chat-Calls (Wall-Clock, nicht nur Socket).
 # Verhindert endloses Blockieren von resp.read() und damit Server-Einfrieren.
 CHAT_TIMEOUT = int(os.environ.get("CHAT_TIMEOUT", "60"))
-# CODE-Modus: eigener Override (Default = CHAT_TIMEOUT).
-CODE_CHAT_TIMEOUT = int(os.environ.get("CODE_CHAT_TIMEOUT", str(CHAT_TIMEOUT)))
+# CODE-Modus: eigener Override. Multi-Round + Diffs brauchen mehr als 60s —
+# Default 180s (vorher = CHAT_TIMEOUT und brach oft mitten in Tool-Ketten ab).
+CODE_CHAT_TIMEOUT = int(os.environ.get("CODE_CHAT_TIMEOUT", "180"))
 # Shell-Whitelist (Regex, match auf den gesamten Befehl). Nie rm/sudo/push usw. (Deny in code_tools).
 # Env-Override: CODE_SHELL_ALLOW mit Einträgen getrennt durch "||" (Komma bricht |Alternativen).
 _CODE_SHELL_DEFAULT = [

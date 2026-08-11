@@ -15,12 +15,15 @@ class CodeToolsTests(unittest.TestCase):
         self._tmpdir = tempfile.TemporaryDirectory()
         self.root = self._tmpdir.name
         self._old_roots = list(config.CODE_WORKSPACE_ROOTS)
+        self._old_reg = getattr(config, "CODE_WORKSPACES_USE_REGISTRY", True)
+        config.CODE_WORKSPACES_USE_REGISTRY = False
         config.CODE_WORKSPACE_ROOTS = [os.path.realpath(self.root)]
         self._old_backup = getattr(config, "CODE_BACKUP_DIR", None)
         config.CODE_BACKUP_DIR = os.path.join(self.root, ".backups")
 
     def tearDown(self):
         config.CODE_WORKSPACE_ROOTS = self._old_roots
+        config.CODE_WORKSPACES_USE_REGISTRY = self._old_reg
         if self._old_backup is not None:
             config.CODE_BACKUP_DIR = self._old_backup
         self._tmpdir.cleanup()
@@ -62,8 +65,12 @@ class CodeToolsTests(unittest.TestCase):
         self.assertTrue(ok)
         ok, _ = code_tools.shell_allowed("git stash")
         self.assertTrue(ok)
-        ok, _ = code_tools.shell_allowed("git push origin main")
+        # push: elevated — ohne Flag abgelehnt, mit Flag erlaubt
+        ok, reason = code_tools.shell_allowed("git push origin main")
         self.assertFalse(ok)
+        self.assertIn("Elevated", reason)
+        ok, _ = code_tools.shell_allowed("git push origin main", allow_elevated=True)
+        self.assertTrue(ok)
         ok, _ = code_tools.shell_allowed("mkdir foo")
         self.assertTrue(ok)
         ok, _ = code_tools.shell_allowed("touch bar.txt")
@@ -80,6 +87,67 @@ class CodeToolsTests(unittest.TestCase):
         self.assertFalse(ok)
         ok, _ = code_tools.shell_allowed("echo $(whoami)")
         self.assertFalse(ok)
+        # Compound: elevated
+        ok, reason = code_tools.shell_allowed(
+            "git status --short && echo done"
+        )
+        self.assertFalse(ok)
+        self.assertIn("Elevated", reason)
+        ok, _ = code_tools.shell_allowed(
+            "git status --short && echo done", allow_elevated=True
+        )
+        self.assertTrue(ok)
+        ok, reason = code_tools.shell_allowed("git status --short; git log -1")
+        self.assertFalse(ok)
+        ok, reason = code_tools.shell_allowed("ls | head")
+        self.assertFalse(ok)
+        # Einzelbefehl bleibt erlaubt
+        ok, _ = code_tools.shell_allowed("git status --short")
+        self.assertTrue(ok)
+
+    def test_shell_classify_service_elevated(self):
+        kind, risk = code_tools.shell_classify("npm run service:install")
+        self.assertEqual(kind, "elevated")
+        self.assertTrue(risk)
+
+    def test_permission_write_free_under_rw(self):
+        d = code_tools.permission_decision(
+            "WriteFile", {"path": "x.txt", "content": "hi"}
+        )
+        self.assertEqual(d["action"], "allow")
+        d2 = code_tools.permission_decision(
+            "RunCommand", {"command": "git status"}
+        )
+        self.assertEqual(d2["action"], "allow")
+        d3 = code_tools.permission_decision(
+            "RunCommand", {"command": "git push"}
+        )
+        self.assertEqual(d3["action"], "confirm")
+        self.assertTrue(d3["elevated"])
+        d4 = code_tools.permission_decision(
+            "RunCommand", {"command": "rm -rf /"}
+        )
+        self.assertEqual(d4["action"], "deny")
+
+    def test_write_execute_without_popup_confirm(self):
+        """r+w: WriteFile läuft mit auto-confirm (Policy allow)."""
+        res = tool_registry.execute(
+            "WriteFile",
+            {"path": "free.txt", "content": "hello\n"},
+            confirm=lambda *_: True,
+            mode="code",
+        )
+        self.assertTrue(res["ok"])
+        self.assertEqual(code_tools.read_file("free.txt")["content"], "hello\n")
+
+    def test_elevated_compound_runs(self):
+        res = code_tools.run_command(
+            "echo a && echo b",
+            allow_elevated=True,
+        )
+        self.assertEqual(res["exit_code"], 0)
+        self.assertIn("a", res["stdout"])
+        self.assertIn("b", res["stdout"])
 
     def test_run_command_echo(self):
         res = code_tools.run_command("echo hello-code")

@@ -252,7 +252,7 @@ CODE_TOOLS = [
         "name": "WriteFile",
         "description": (
             "Schreibt/überschreibt eine Datei (kompletter Inhalt) mit Backup. "
-            "Benötigt Glyph-Genehmigung. Kein Löschen."
+            "Unter Workspace-Mode r+w ohne Popup. Kein Löschen."
         ),
         "args": {"path": "str", "content": "str, kompletter neuer Dateiinhalt"},
         "write": True,
@@ -261,7 +261,7 @@ CODE_TOOLS = [
         "name": "SearchReplace",
         "description": (
             "Ersetzt old→new exakt einmal in einer Datei (1 Treffer Pflicht). "
-            "Backup wie WriteFile. Benötigt Glyph-Genehmigung."
+            "Backup wie WriteFile. Unter r+w ohne Popup."
         ),
         "args": {"path": "str", "old": "str, exakter bisheriger Text", "new": "str, Ersatz"},
         "write": True,
@@ -269,15 +269,16 @@ CODE_TOOLS = [
     {
         "name": "RunCommand",
         "description": (
-            "Führt einen Whitelist-Shell-Befehl im Workspace aus (z.B. git status/add/commit, "
-            "npm test, pytest, ls, mkdir, cp). Benötigt Glyph-Genehmigung. Kein rm/sudo/push."
+            "Shell im Workspace (r+w). Whitelist (git status/add/commit, npm test, pytest, ls…) "
+            "ohne Popup. Elevated (git push/pull/fetch, Compound/&&/|, npm run service:*) "
+            "braucht Glyph-Freigabe. Hart verboten: rm/sudo/…."
         ),
         "args": {
             "command": "str",
             "cwd": "str (optional, relativ zu Root)",
             "timeout": "int Sekunden optional, max 120",
         },
-        "write": True,  # Genehmigungspflicht wie Write
+        "write": True,  # Policy entscheidet Popup vs auto
     },
 ]
 
@@ -349,7 +350,7 @@ def try_parse_tool_call(text):
     return None
 
 
-def execute(tool_name, args, confirm=None, mode="agent"):
+def execute(tool_name, args, confirm=None, mode="agent", allow_elevated=False):
     """
     Führt ein Tool kontrolliert aus.
 
@@ -359,6 +360,7 @@ def execute(tool_name, args, confirm=None, mode="agent"):
       ausgeführt.
 
     mode: "agent" (Vault) | "code" (^_Code Workspace-Tools)
+    allow_elevated: CODE — Elevated-Shell nach Glyph-Freigabe erlauben
 
     Rückgabe: dict {"ok": bool, "result": ..., "error": str|None}
     """
@@ -380,7 +382,7 @@ def execute(tool_name, args, confirm=None, mode="agent"):
 
     try:
         if mode == "code":
-            return _execute_code(tool_name, args or {})
+            return _execute_code(tool_name, args or {}, allow_elevated=allow_elevated)
         return _execute_agent(tool_name, args or {})
     except Exception as e:
         return {"ok": False, "result": None, "error": str(e)}
@@ -481,7 +483,7 @@ def _execute_agent(tool_name, args):
     return {"ok": False, "result": None, "error": f"Tool '{tool_name}' nicht implementiert."}
 
 
-def _execute_code(tool_name, args):
+def _execute_code(tool_name, args, allow_elevated=False):
     from . import code_tools
     if tool_name == "ListDir":
         res = code_tools.list_dir(
@@ -521,6 +523,7 @@ def _execute_code(tool_name, args):
             args.get("command", ""),
             cwd=args.get("cwd"),
             timeout=int(timeout) if timeout is not None else None,
+            allow_elevated=bool(allow_elevated),
         )
         # exit_code != 0 ist kein Tool-Fehler — Ergebnis trotzdem ok
         return {"ok": True, "result": res}

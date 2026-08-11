@@ -26,11 +26,34 @@ Ollama bleibt **nur** für lokale Embeddings (`bge-m3`), nicht als Antwort-KI.
 
 ## Datenschutz (ohne LLM-Theater)
 
-1. **Privat / Red Line** nie indexieren, nie lesen, nie an Cloud senden (`BLOCKED_DIRS`, Vault-Whitelist).
+1. **Privat / Red Line** nie indexieren, nie lesen, nie an Cloud senden (`BLOCKED_DIRS`, Vault-Whitelist,
+   plus heikle Pfad-/Dateinamen-Muster in `vault_tools._is_blocked`).
 2. An die Cloud gehen nur **minimierte Ausschnitte** (`EXTERNAL_MAX_CHARS`); jede Cloud-Sendung wird auditiert.
 3. **Schreiben** nur mit Bestätigung (Diff → ApplyEdit + Backup). Kein Löschen/Umbenennen.
-4. Vault-Inhalt = **Daten**, keine Anweisungen (Prompt-Injection-Schutz).
+4. Vault-Inhalt = **Daten**, keine Anweisungen (Prompt-Injection-Schutz) —
+   **Ausnahme:** `AGENTS.md` pro Vault = VAULT-VERTRAG (Arbeitsregeln, geladen in System-Prompt).
 5. Web-Recherche = öffentliche Suchbegriffe; **keine** privaten Vault-Texte in die Query.
+
+## Vault-Verträge & Jobs (2026-08-09)
+
+- HSEQ: `…/HSEQ Sync/AGENTS.md` · Wiki: `…/memory-wiki/AGENTS.md`
+- Skills: `~/.glyph-agent/skills/` (`hseq-*`, `vault-ingest`, `merken`)
+- Jobs: Alias `hseq-*` ≡ recurring `td-*` (`jobs/recurring.json`)
+- Handover: 3-Zeilen-Briefing (Neu / Offen / Konflikt-Stale)
+
+## Shared SoT + Memory — alle Profile (2026-08-09)
+
+**Ziel:** Grok, ^_Code und °_Agent denselben Stand — nichts im Chat wiederholen.
+
+| Schicht | Pfad |
+|---------|------|
+| **SoT (Vertrag)** | `~/.glyph/AGENTS.md` |
+| **Memory (Lektionen/Historie)** | `~/.glyph/MEMORY.md` — **zentral, nicht unter OpenClaw** |
+| Skills | `~/.glyph/skills/` |
+| Grok | `~/.grok/rules/glyph-shared.md` + `glyph-memory.md` |
+| °_Agent / ^_Code | System-Prompt lädt AGENTS + MEMORY |
+
+OpenClaw = Auslauf. Alte `~/.openclaw/workspace/MEMORY.md` = Stub-Verweis.
 
 ## Recherche
 

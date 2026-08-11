@@ -18,7 +18,8 @@ sys.path.insert(0, ROOT)
 
 from core import config  # noqa: E402
 
-# Muster, die im Wiki/Index heikel sind (Lektion OpenClaw unsafe-local)
+# Muster, die im Wiki/Index heikel sind (Lektion OpenClaw unsafe-local / Privat-Spiegel)
+# Nicht: generische HSEQ-unsafe-local-themen/schulung (Fachkopien).
 HEIKLE_PATTERNS = [
     r"privat",
     r"passwort",
@@ -29,11 +30,18 @@ HEIKLE_PATTERNS = [
     r"health",
     r"behörden-recht",
     r"behoerden-recht",
+    r"behörd",
+    r"behoerd",
     r"familie-",
     r"unterhalt",
     r"jugendamt",
     r"recovery",
     r"_recovery",
+    r"wiki-import",
+    r"unsafe-local-behörd",
+    r"unsafe-local-behoerd",
+    r"unsafe-local-familie",
+    r"unsafe-local-finanzen",
 ]
 
 WIKI = None

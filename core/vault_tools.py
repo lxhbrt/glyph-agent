@@ -28,20 +28,49 @@ def _resolve_vault_path(relative_or_abs):
     Löst einen Pfad relativ zu einem der konfigurierten Vaults auf und stellt sicher,
     dass er innerhalb EINES davon bleibt (Block gegen ../-Pfadmanipulation).
     Liefert absoluten, kanonischen Pfad oder None (unsicher).
+
+    Akzeptiert u. a.:
+      - absolut unter einem Vault-Root
+      - relativ zum Vault-Root: "Vorlagen/Jobs/x.md"
+      - mit Vault-Präfix (wie ListVaultDir/Treffer): "HSEQ Sync/Vorlagen/Jobs/x.md"
     """
-    vault_roots = [os.path.realpath(v) for v in getattr(config, "VAULT_PATHS", [config.VAULT_PATH])]
-    if os.path.isabs(relative_or_abs):
-        cand = os.path.realpath(relative_or_abs)
+    vault_roots = [
+        os.path.realpath(v)
+        for v in getattr(config, "VAULT_PATHS", [config.VAULT_PATH])
+        if v
+    ]
+    raw = (relative_or_abs or "").strip()
+    if not raw:
+        return None
+    if os.path.isabs(raw):
+        cand = os.path.realpath(raw)
         for v in vault_roots:
             if cand == v or cand.startswith(v + os.sep):
                 return cand
         return None
-    # Relative Pfade werden auf jeden Vault-Root bezogen; der erste Treffer gewinnt.
+
+    # "HSEQ Sync/…"-Präfix → im passenden Vault-Root auflösen (erster Match)
+    norm = raw.replace("\\", "/").lstrip("./")
     for v in vault_roots:
-        cand = os.path.realpath(os.path.join(v, relative_or_abs))
+        vname = os.path.basename(v)
+        if norm == vname or norm.startswith(vname + "/"):
+            rest = "" if norm == vname else norm[len(vname) + 1 :]
+            cand = os.path.realpath(os.path.join(v, rest)) if rest else v
+            if cand == v or cand.startswith(v + os.sep):
+                if os.path.lexists(cand) or rest:
+                    # existierend ODER erlaubter Schreib-Zielpfad unter Root
+                    if cand == v or cand.startswith(v + os.sep):
+                        return cand if (os.path.exists(cand) or rest) else None
+    # Relative Pfade: erster existierender Treffer unter den Roots; sonst erster Kandidat unter Root
+    first_under = None
+    for v in vault_roots:
+        cand = os.path.realpath(os.path.join(v, norm))
         if cand == v or cand.startswith(v + os.sep):
-            return cand
-    return None
+            if first_under is None:
+                first_under = cand
+            if os.path.exists(cand):
+                return cand
+    return first_under
 
 
 def _root_for_path(abs_path):
@@ -73,16 +102,33 @@ def _safe_md_name(path):
     return path
 
 
+# Datei-/Pfad-Muster (heikle Privat-Spiegel im Wiki), zusätzlich zu BLOCKED_DIRS.
+# HSEQ-fachliche unsafe-local-* (themen, schulung, …) bleiben indexierbar.
+_HEIKLE_PATH_RE = re.compile(
+    r"(behörden-recht|behoerden-recht|jugendamt|personenbezogen|"
+    r"passwort|password|wiki-import|"
+    r"unsafe-local-behörd|unsafe-local-behoerd|unsafe-local-familie|"
+    r"unsafe-local-finanzen|"
+    r"(^|/)familie[-_/]|"
+    r"unterhalts?(v|vorschuss|rück|ruck|klage|urkunde))",
+    re.I,
+)
+
+
 def _is_blocked(relpath):
     """True, wenn der Pfad in einen geschützten Ordner zeigt (case-insensitiv).
     Matching ist tolerant: Blocklist-Stichwort wird als Teilstring gegen den
-    Ordnernamen geprüft (z. B. 'privat' trifft 'Privat', 'private', 'Privates')."""
-    parts = relpath.replace(os.sep, "/").lower().split("/")
+    Ordnernamen geprüft (z. B. 'privat' trifft 'Privat', 'private', 'Privates').
+    Zusätzlich: heikle Privat-/Behörden-Spiegel im Dateinamen (G3)."""
+    low = relpath.replace(os.sep, "/").lower()
+    parts = low.split("/")
     blocked = [b.lower().strip() for b in (getattr(config, "BLOCKED_DIRS", []) or []) if b.strip()]
     for p in parts:
         for b in blocked:
             if b and (b in p or p in b):
                 return True
+    if _HEIKLE_PATH_RE.search(low):
+        return True
     return False
 
 
@@ -202,9 +248,18 @@ def search_vault(query, limit=20):
     query_l = query.lower()
     tokens = _tokenize_query(query)
     results = []
-    vault_roots = getattr(config, "VAULT_PATHS", [config.VAULT_PATH])
+    vault_roots = [v for v in getattr(config, "VAULT_PATHS", [config.VAULT_PATH]) if v]
+    try:
+        from . import vaults_registry as _vr
+
+        _priv = {os.path.realpath(p) for p in _vr.private_paths()}
+    except Exception:
+        _priv = set()
     for vault_i, vroot in enumerate(vault_roots):
         vroot_r = os.path.realpath(vroot)
+        if vroot_r in _priv:
+            # Privat: kein Auto-Search (Cloud-Korpus) — nur explizites ReadNote
+            continue
         vault_name = os.path.basename(vroot_r)
         for root, _dirs, files in os.walk(vroot_r):
             # Obsidian-interne Ordner + Backups ausschließen
@@ -519,6 +574,30 @@ def apply_edit(path, new_content):
     resolved = _resolve_vault_path(path)
     if resolved is None:
         raise ValueError(f"Unsicherer Pfad: {path}")
+    try:
+        from . import vaults_registry as _vr
+
+        if _vr.is_private_path(resolved):
+            raise ValueError("Privat-Vault: Schreiben gesperrt (Schloss)")
+        # mode r: block writes unless under classic HSEQ job prefixes (handled by jobs)
+        if not _vr.is_writable_path(resolved):
+            # still allow if vault mode is rw only
+            modes_ok = False
+            for v in _vr.list_vaults():
+                if not v.get("enabled", True):
+                    continue
+                root = os.path.realpath(v["path"])
+                if (resolved == root or resolved.startswith(root + os.sep)) and v.get(
+                    "mode"
+                ) == "rw":
+                    modes_ok = True
+                    break
+            if not modes_ok:
+                raise ValueError("Vault ist nur-lesen (r) — Schreiben gesperrt")
+    except ValueError:
+        raise
+    except Exception:
+        pass
 
     old_content = current["content"]
     if old_content == new_content:

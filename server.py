@@ -10,7 +10,31 @@ die Tool-Orchestrierung nutzen kann, ohne die Agentenlogik selbst zu tragen.
                -> {"answer": str, "rounds": int, "tool_calls": [...], "ok": bool}
   history: optional prior Turns (user/assistant) für Multi-Turn-Nachfragen.
 
+  GET  /jobs        -> Legacy-Liste (seed-Namen); neu: /recurring
+  POST /jobs/run    -> Legacy; neu: POST /recurring/<id>/run
+
+  GET    /recurring              Liste wiederkehrender To-dos (+ Migration)
+  POST   /recurring              Anlegen {title,prompt,schedule,allow_write,paused}
+  PATCH  /recurring/<id>         Update
+  DELETE /recurring/<id>         Löschen
+  POST   /recurring/<id>/run     {force?: true} einmal / fällig
+  POST   /recurring/<id>/pause   {paused: true|false}
+  POST   /recurring/run-due      Scheduler: alle fälligen
+  GET    /recurring/events?after= ISO-Events für UI-Systemzeilen
+
   GET  /health -> {"status": "ok", "provider": "...", "model": "..."}
+
+  GET    /vaults              Kabelsalat-Snapshot (~/.glyph/vaults.json)
+  POST   /vaults              Anbinden {input, mode?}
+  PATCH  /vaults/<id>         mode|primary|move|enabled|name|pins
+  DELETE /vaults/<id>         Lösen
+  POST   /vaults/<id>/pins    {path, label?}
+  DELETE /vaults/<id>/pins    body {path}
+
+  GET    /workspaces          Kabelsalat-Snapshot (~/.glyph/workspaces.json) — ^_Code
+  POST   /workspaces          Anbinden {input|path, mode?}
+  PATCH  /workspaces/<id>     mode|primary|move|enabled|name
+  DELETE /workspaces/<id>     Lösen
 
 Läuft standardmäßig auf 127.0.0.1:PORT (nur lokal). Keine externen Abhängigkeiten.
 Enthält KEINE Bestätigungs-UI: für Schreib-Tools liefert der Server ein
@@ -19,6 +43,8 @@ Enthält KEINE Bestätigungs-UI: für Schreib-Tools liefert der Server ein
 import json
 import os
 import sys
+import threading
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -32,9 +58,19 @@ except Exception:
 
 from core import config, tool_loop, llm
 from core import code_loop
+from core import jobs as agent_jobs
+from core import recurring as agent_recurring
+from core import vaults_registry as agent_vaults
+from core import workspaces_registry as agent_workspaces
 
 PORT = int(os.environ.get("GLYPH_AGENT_PORT", "18899"))
 HOST = os.environ.get("GLYPH_AGENT_HOST", "127.0.0.1")
+
+# Kabelsalat: Vault-Pfade aus ~/.glyph/vaults.json
+try:
+    config.reload_vault_paths()
+except Exception:
+    pass
 
 # --- Textanhänge (Stufe 1) + PDF wenn extrahierbar ---
 _ATTACH_TEXT_MIMES = {
@@ -203,6 +239,10 @@ def _normalize_images(raw):
 
 
 def _handle_chat(payload, send=None):
+    try:
+        config.reload_vault_paths()
+    except Exception:
+        pass
     """Verarbeitet eine /chat-Anfrage.
 
     send: optionaler Callback send(dict) for Live-Streaming. Wenn gesetzt, wird
@@ -435,9 +475,58 @@ def main():
             self.wfile.write(body)
 
         def do_GET(self):
-            path = self.path.split("?", 1)[0]
+            full = self.path
+            path = full.split("?", 1)[0]
+            qs = full.split("?", 1)[1] if "?" in full else ""
             if path == "/health" or path.startswith("/health"):
+                try:
+                    config.reload_vault_paths()
+                except Exception:
+                    pass
                 self._send(200, _handle_health())
+            elif path in ("/vaults", "/vaults/"):
+                try:
+                    config.reload_vault_paths()
+                    self._send(200, agent_vaults.public_snapshot())
+                except Exception as e:
+                    self._send(500, {"ok": False, "error": str(e)})
+            elif path in ("/workspaces", "/workspaces/"):
+                try:
+                    self._send(200, agent_workspaces.public_snapshot())
+                except Exception as e:
+                    self._send(500, {"ok": False, "error": str(e)})
+            elif path in ("/recurring", "/recurring/"):
+                try:
+                    mig = agent_recurring.ensure_migrated()
+                    self._send(
+                        200,
+                        {
+                            "ok": True,
+                            "items": agent_recurring.list_items(),
+                            "migration": mig,
+                        },
+                    )
+                except Exception as e:
+                    self._send(500, {"ok": False, "error": str(e)})
+            elif path in ("/recurring/events", "/recurring/events/"):
+                after = ""
+                for part in qs.split("&"):
+                    if part.startswith("after="):
+                        from urllib.parse import unquote
+
+                        after = unquote(part[6:])
+                try:
+                    self._send(
+                        200,
+                        {
+                            "ok": True,
+                            "events": agent_recurring.list_events(after_ts=after),
+                        },
+                    )
+                except Exception as e:
+                    self._send(500, {"ok": False, "error": str(e)})
+            elif path in ("/jobs", "/jobs/"):
+                self._send(200, {"ok": True, "jobs": agent_jobs.list_jobs()})
             elif path in ("/models", "/models/"):
                 # Snapshot only (same shape as /health["models"]); mutate via POST.
                 try:
@@ -449,8 +538,155 @@ def main():
             else:
                 self._send(404, {"error": "Not found"})
 
+        def do_PATCH(self):
+            path = self.path.split("?", 1)[0]
+            if path.startswith("/vaults/") and path.count("/") >= 2:
+                parts = path.rstrip("/").split("/")
+                # /vaults/<id> or /vaults/<id>/pins
+                if len(parts) >= 3 and parts[1] == "vaults":
+                    vid = parts[2]
+                    payload, err = _read_json_body(self)
+                    if err:
+                        self._send(400, {"error": err, "ok": False})
+                        return
+                    try:
+                        if len(parts) >= 4 and parts[3] == "pins":
+                            item = agent_vaults.add_pin(
+                                vid,
+                                str((payload or {}).get("path") or ""),
+                                str((payload or {}).get("label") or ""),
+                            )
+                            self._send(200, {"ok": True, "vault": item})
+                        else:
+                            item = agent_vaults.update_vault(vid, payload or {})
+                            self._send(200, {"ok": True, "vault": item})
+                    except ValueError as e:
+                        self._send(400, {"ok": False, "error": str(e)})
+                    except Exception as e:
+                        self._send(500, {"ok": False, "error": str(e)})
+                    return
+            if path.startswith("/workspaces/") and path.count("/") >= 2:
+                parts = path.rstrip("/").split("/")
+                if len(parts) >= 3 and parts[1] == "workspaces":
+                    wid = parts[2]
+                    payload, err = _read_json_body(self)
+                    if err:
+                        self._send(400, {"error": err, "ok": False})
+                        return
+                    try:
+                        item = agent_workspaces.update_workspace(wid, payload or {})
+                        self._send(200, {"ok": True, "workspace": item})
+                    except ValueError as e:
+                        self._send(400, {"ok": False, "error": str(e)})
+                    except Exception as e:
+                        self._send(500, {"ok": False, "error": str(e)})
+                    return
+            if path.startswith("/recurring/") and path.count("/") >= 2:
+                item_id = path.rstrip("/").split("/")[-1]
+                if item_id in ("run-due", "events"):
+                    self._send(404, {"error": "Not found"})
+                    return
+                payload, err = _read_json_body(self)
+                if err:
+                    self._send(400, {"error": err, "ok": False})
+                    return
+                try:
+                    item = agent_recurring.update_item(item_id, payload or {})
+                    self._send(200, {"ok": True, "item": item})
+                except ValueError as e:
+                    self._send(400, {"ok": False, "error": str(e)})
+                except Exception as e:
+                    self._send(500, {"ok": False, "error": str(e)})
+                return
+            self._send(404, {"error": "Not found"})
+
+        def do_DELETE(self):
+            path = self.path.split("?", 1)[0]
+            if path.startswith("/vaults/") and path.count("/") >= 2:
+                parts = path.rstrip("/").split("/")
+                if len(parts) >= 3 and parts[1] == "vaults":
+                    vid = parts[2]
+                    try:
+                        if len(parts) >= 4 and parts[3] == "pins":
+                            payload, err = _read_json_body(self)
+                            if err:
+                                self._send(400, {"error": err, "ok": False})
+                                return
+                            item = agent_vaults.remove_pin(
+                                vid, str((payload or {}).get("path") or "")
+                            )
+                            self._send(200, {"ok": True, "vault": item})
+                        else:
+                            ok = agent_vaults.detach(vid)
+                            self._send(200 if ok else 404, {"ok": ok, "id": vid})
+                    except ValueError as e:
+                        self._send(400, {"ok": False, "error": str(e)})
+                    except Exception as e:
+                        self._send(500, {"ok": False, "error": str(e)})
+                    return
+            if path.startswith("/workspaces/") and path.count("/") >= 2:
+                parts = path.rstrip("/").split("/")
+                if len(parts) >= 3 and parts[1] == "workspaces":
+                    wid = parts[2]
+                    try:
+                        ok = agent_workspaces.detach(wid)
+                        self._send(200 if ok else 404, {"ok": ok, "id": wid})
+                    except ValueError as e:
+                        self._send(400, {"ok": False, "error": str(e)})
+                    except Exception as e:
+                        self._send(500, {"ok": False, "error": str(e)})
+                    return
+            if path.startswith("/recurring/") and path.count("/") >= 2:
+                item_id = path.rstrip("/").split("/")[-1]
+                try:
+                    ok = agent_recurring.delete_item(item_id)
+                    self._send(200 if ok else 404, {"ok": ok, "id": item_id})
+                except Exception as e:
+                    self._send(500, {"ok": False, "error": str(e)})
+                return
+            self._send(404, {"error": "Not found"})
+
         def do_POST(self):
             path = self.path.split("?", 1)[0]
+            if path in ("/vaults", "/vaults/"):
+                payload, err = _read_json_body(self)
+                if err:
+                    self._send(400, {"error": err, "ok": False})
+                    return
+                try:
+                    raw_in = str(
+                        (payload or {}).get("input")
+                        or (payload or {}).get("path")
+                        or (payload or {}).get("uri")
+                        or ""
+                    )
+                    mode = str((payload or {}).get("mode") or "r")
+                    res = agent_vaults.attach(raw_in, mode=mode)
+                    self._send(200, {"ok": True, **res})
+                except ValueError as e:
+                    self._send(400, {"ok": False, "error": str(e)})
+                except Exception as e:
+                    self._send(500, {"ok": False, "error": str(e)})
+                return
+            if path in ("/workspaces", "/workspaces/"):
+                payload, err = _read_json_body(self)
+                if err:
+                    self._send(400, {"error": err, "ok": False})
+                    return
+                try:
+                    raw_in = str(
+                        (payload or {}).get("input")
+                        or (payload or {}).get("path")
+                        or ""
+                    )
+                    mode = str((payload or {}).get("mode") or "r")
+                    res = agent_workspaces.attach(raw_in, mode=mode)
+                    self._send(200, {"ok": True, **res})
+                except ValueError as e:
+                    self._send(400, {"ok": False, "error": str(e)})
+                except Exception as e:
+                    self._send(500, {"ok": False, "error": str(e)})
+                return
             if path in ("/models", "/models/"):
                 payload, err = _read_json_body(self)
                 if err:
@@ -474,6 +710,81 @@ def main():
                     self._send(400, {"error": str(e), "ok": False})
                 except Exception as e:
                     self._send(500, {"error": str(e), "ok": False})
+                return
+            # --- recurring todos ---
+            if path in ("/recurring", "/recurring/"):
+                payload, err = _read_json_body(self)
+                if err:
+                    self._send(400, {"error": err, "ok": False})
+                    return
+                try:
+                    agent_recurring.ensure_migrated()
+                    item = agent_recurring.create_item(payload or {})
+                    self._send(200, {"ok": True, "item": item})
+                except ValueError as e:
+                    self._send(400, {"ok": False, "error": str(e)})
+                except Exception as e:
+                    self._send(500, {"ok": False, "error": str(e)})
+                return
+            if path in ("/recurring/run-due", "/recurring/run-due/"):
+                try:
+                    agent_recurring.ensure_migrated()
+                    self._send(200, agent_recurring.run_due())
+                except Exception as e:
+                    self._send(500, {"ok": False, "error": str(e)})
+                return
+            if path.startswith("/recurring/") and path.rstrip("/").endswith("/run"):
+                parts = path.rstrip("/").split("/")
+                # /recurring/<id>/run
+                item_id = parts[-2] if len(parts) >= 3 else ""
+                payload, err = _read_json_body(self)
+                if err:
+                    payload = {}
+                try:
+                    result = agent_recurring.run_item(
+                        item_id, force=bool((payload or {}).get("force", True))
+                    )
+                    self._send(200, result)
+                except Exception as e:
+                    self._send(500, {"ok": False, "error": str(e), "id": item_id})
+                return
+            if path.startswith("/recurring/") and path.rstrip("/").endswith("/pause"):
+                parts = path.rstrip("/").split("/")
+                item_id = parts[-2] if len(parts) >= 3 else ""
+                payload, err = _read_json_body(self)
+                if err:
+                    self._send(400, {"error": err, "ok": False})
+                    return
+                paused = True if payload is None else bool((payload or {}).get("paused", True))
+                try:
+                    item = agent_recurring.set_paused(item_id, paused)
+                    self._send(200, {"ok": True, "item": item})
+                except ValueError as e:
+                    self._send(400, {"ok": False, "error": str(e)})
+                except Exception as e:
+                    self._send(500, {"ok": False, "error": str(e)})
+                return
+            if path in ("/jobs/run", "/jobs/run/"):
+                # Legacy: map seed job names → recurring ids
+                payload, err = _read_json_body(self)
+                if err:
+                    self._send(400, {"error": err, "ok": False})
+                    return
+                job_id = str((payload or {}).get("job") or (payload or {}).get("id") or "").strip()
+                alias = {
+                    "hseq-eingang": "td-eingang",
+                    "hseq-handover": "td-handover",
+                    "hseq-aus-fertig-lernen": "td-lernen",
+                }
+                rid = alias.get(job_id, job_id)
+                try:
+                    agent_recurring.ensure_migrated()
+                    result = agent_recurring.run_item(
+                        rid, force=bool((payload or {}).get("force", True))
+                    )
+                    self._send(200, result)
+                except Exception as e:
+                    self._send(500, {"error": str(e), "ok": False, "job": job_id})
                 return
             if path == "/chat" or path.startswith("/chat"):
                 payload, err = _read_json_body(self)
@@ -539,6 +850,41 @@ def main():
         f"CODE={getattr(config, 'CODE_CHAT_TIMEOUT', 60)}s · threaded"
     )
     print("  POST /chat  |  GET /health  |  GET|POST /models  |  POST /models/probe")
+    print("  GET|POST /recurring  |  POST /recurring/<id>/run|pause  |  POST /recurring/run-due")
+    try:
+        agent_recurring.ensure_migrated()
+    except Exception as e:
+        print(f"  (recurring migration warn: {e})", file=sys.stderr)
+
+    # Einmal bei Start: fällige To-dos nachziehen (Catch-up-Plist kann vor dem Agent laufen).
+    def _run_due_once_on_start():
+        delay = float(os.environ.get("GLYPH_RECURRING_STARTUP_DELAY_S", "2") or "2")
+        if delay > 0:
+            time.sleep(delay)
+        try:
+            from core import log as agent_log
+
+            agent_log.log("recurring_startup_run_due_begin")
+            result = agent_recurring.run_due()
+            ran = result.get("ran", 0) if isinstance(result, dict) else "?"
+            msg = f"recurring run-due (Start): ran={ran}"
+            print(msg, flush=True)
+            agent_log.log("recurring_startup_run_due_done", ran=ran)
+        except Exception as e:
+            print(f"  (recurring run-due Start warn: {e})", file=sys.stderr, flush=True)
+            try:
+                from core import log as agent_log
+
+                agent_log.log("recurring_startup_run_due_error", error=str(e)[:300])
+            except Exception:
+                pass
+
+    threading.Thread(
+        target=_run_due_once_on_start,
+        name="recurring-run-due-startup",
+        daemon=True,
+    ).start()
+
     try:
         server.serve_forever()
     except KeyboardInterrupt:
