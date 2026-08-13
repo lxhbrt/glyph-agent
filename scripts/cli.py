@@ -25,6 +25,7 @@ from core import config, vault_tools, agent
 from core import dotenv
 
 dotenv.load_dotenv()  # optionale .env laden (EXA_API_KEY etc.), Umgebung gewinnt
+config.reload_vault_paths()
 
 USAGE = __doc__
 

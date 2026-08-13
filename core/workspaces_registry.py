@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Code-Workspace-Registry (SoT für ^_Code).
+Code-Workspace-Registry (SoT für ^_Code) — Adapter auf bind_store.
 
 Nutzer:   ~/.glyph/workspaces.json
 Modes:    r | rw | private  (Vault-Analog)
@@ -10,18 +10,17 @@ Kabelsalat-UI (Phase 2): attach / detach / update / public_snapshot.
 """
 from __future__ import annotations
 
-import json
 import os
-import re
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import List, Optional
 
-from . import log
+from . import bind_store, log
 
 GLYPH_DIR = os.path.expanduser("~/.glyph")
 USER_STORE = os.path.join(GLYPH_DIR, "workspaces.json")
 
-_MODES = frozenset({"r", "rw", "private"})
+EXTRA = ()
+FLAGS = dict(reorder=False, require_exists=True)
 
 _HOME = os.path.expanduser("~")
 _SEED = [
@@ -48,66 +47,15 @@ _SEED = [
     },
 ]
 
-_mtime_cache: Tuple[float, Optional[dict]] = (0.0, None)
-
 
 def _slug(name: str) -> str:
-    s = re.sub(r"[^a-zA-Z0-9]+", "-", (name or "ws").strip().lower()).strip("-")
-    return (s or "ws")[:48]
-
-
-def _empty_store() -> dict:
-    return {"version": 1, "workspaces": []}
-
-
-def _normalize(raw: dict, order: int) -> Optional[dict]:
-    if not isinstance(raw, dict):
-        return None
-    path = str(raw.get("path") or "").strip()
-    if not path:
-        return None
-    path = os.path.expanduser(path)
-    try:
-        path = os.path.realpath(path)
-    except OSError:
-        pass
-    name = str(raw.get("name") or os.path.basename(path) or "Workspace").strip()
-    mode = str(raw.get("mode") or "r").strip().lower()
-    if mode == "r+w":
-        mode = "rw"
-    if mode not in _MODES:
-        mode = "r"
-    wid = str(raw.get("id") or "").strip() or _slug(name)
-    return {
-        "id": wid,
-        "name": name[:120],
-        "path": path,
-        "mode": mode,
-        "primary": bool(raw.get("primary")),
-        "enabled": raw.get("enabled", True) is not False,
-        "order": int(raw.get("order", order)),
-        "exists": os.path.isdir(path),
-    }
-
-
-def _fix_primary(items: List[dict]) -> List[dict]:
-    enabled = [w for w in items if w.get("enabled") and w.get("exists")]
-    if not enabled:
-        return items
-    primaries = [w for w in enabled if w.get("primary")]
-    if len(primaries) == 1:
-        return items
-    # keep first enabled as primary
-    first_id = enabled[0]["id"]
-    for w in items:
-        w["primary"] = w["id"] == first_id and w.get("enabled") and w.get("exists")
-    return items
+    return bind_store.slug(name, fallback="ws")
 
 
 def _seed_store() -> dict:
     workspaces = []
     for i, raw in enumerate(_SEED):
-        w = _normalize({**raw}, i)
+        w = bind_store.normalize_item({**raw}, i)
         if w and w["exists"]:
             workspaces.append(w)
     # Fallback: CODE_WORKSPACE_ROOTS / defaults from config if seed empty
@@ -115,7 +63,7 @@ def _seed_store() -> dict:
         try:
             from . import config
             for i, p in enumerate(getattr(config, "CODE_WORKSPACE_ROOTS", []) or []):
-                w = _normalize(
+                w = bind_store.normalize_item(
                     {
                         "path": p,
                         "name": os.path.basename(p) or p,
@@ -128,75 +76,36 @@ def _seed_store() -> dict:
                     workspaces.append(w)
         except Exception:
             pass
-    workspaces = _fix_primary(workspaces)
     log.log("workspaces_seeded", count=len(workspaces))
     return {"version": 1, "workspaces": workspaces, "seeded": True}
 
 
 def load_store(*, force: bool = False) -> dict:
     """Lädt Nutzer-SoT; seedet einmalig wenn Datei fehlt."""
-    global _mtime_cache
     os.makedirs(GLYPH_DIR, exist_ok=True)
 
     if not os.path.isfile(USER_STORE):
         store = _seed_store()
-        save_store(store)
-        try:
-            mtime = os.path.getmtime(USER_STORE)
-        except OSError:
-            mtime = 0.0
-        _mtime_cache = (mtime, store)
-        return store
+        return save_store(store)
 
-    try:
-        mtime = os.path.getmtime(USER_STORE)
-    except OSError:
-        mtime = 0.0
-    if not force and _mtime_cache[1] is not None and _mtime_cache[0] == mtime:
-        return _mtime_cache[1]
-
-    try:
-        with open(USER_STORE, encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        data = _empty_store()
-    if not isinstance(data, dict):
-        data = _empty_store()
-    data.setdefault("version", 1)
-    workspaces = []
-    for i, raw in enumerate(data.get("workspaces") or []):
-        w = _normalize(raw, i)
-        if w:
-            workspaces.append(w)
-    workspaces = _fix_primary(workspaces)
-    data["workspaces"] = workspaces
-    _mtime_cache = (mtime, data)
-    return data
+    return bind_store.load_store(
+        USER_STORE, "workspaces", extra_keys=EXTRA, force=force, **FLAGS
+    )
 
 
 def save_store(data: dict) -> dict:
-    global _mtime_cache
-    os.makedirs(GLYPH_DIR, exist_ok=True)
-    workspaces = []
-    for i, raw in enumerate(data.get("workspaces") or []):
-        w = _normalize(raw, i)
-        if w:
-            workspaces.append(w)
-    workspaces = _fix_primary(workspaces)
-    out: Dict[str, Any] = {"version": 1, "workspaces": workspaces}
+    extra_meta = {}
     if data.get("seeded"):
-        out["seeded"] = True
-    tmp = USER_STORE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(out, f, ensure_ascii=False, indent=2)
-        f.write("\n")
-    os.replace(tmp, USER_STORE)
-    try:
-        mtime = os.path.getmtime(USER_STORE)
-    except OSError:
-        mtime = 0.0
-    _mtime_cache = (mtime, out)
-    log.log("workspaces_saved", count=len(workspaces))
+        extra_meta["seeded"] = True
+    out = bind_store.save_store(
+        USER_STORE,
+        data,
+        "workspaces",
+        extra_keys=EXTRA,
+        extra_meta=extra_meta or None,
+        **FLAGS,
+    )
+    log.log("workspaces_saved", count=len(out.get("workspaces") or []))
     return out
 
 
@@ -322,11 +231,7 @@ def parse_attach_input(raw: str) -> dict:
 
 def attach(raw_input: str, mode: str = "r") -> dict:
     parsed = parse_attach_input(raw_input)
-    mode = (mode or "r").lower()
-    if mode == "r+w":
-        mode = "rw"
-    if mode not in _MODES:
-        mode = "r"
+    mode = bind_store.normalize_mode(mode or "r")
     store = load_store(force=True)
     path = parsed["path"]
     for w in store.get("workspaces") or []:
@@ -337,7 +242,7 @@ def attach(raw_input: str, mode: str = "r") -> dict:
         if existing == path:
             raise ValueError("Workspace bereits angebunden")
 
-    ws = _normalize(
+    ws = bind_store.normalize_item(
         {
             "id": _slug(parsed["name"]) + "-" + uuid.uuid4().hex[:4],
             "name": parsed["name"],
@@ -356,51 +261,19 @@ def attach(raw_input: str, mode: str = "r") -> dict:
 
 
 def detach(wid: str) -> bool:
-    store = load_store(force=True)
-    before = len(store.get("workspaces") or [])
-    store["workspaces"] = [
-        w for w in (store.get("workspaces") or []) if w.get("id") != wid
-    ]
-    if len(store["workspaces"]) == before:
-        return False
-    save_store(store)
-    return True
+    ok = bind_store.detach_item(
+        USER_STORE, "workspaces", wid, extra_keys=EXTRA, **FLAGS
+    )
+    if ok:
+        log.log("workspaces_saved", count=len(list_workspaces()))
+    return ok
 
 
 def update_workspace(wid: str, patch: dict) -> dict:
-    store = load_store(force=True)
-    found = None
-    for w in store.get("workspaces") or []:
-        if w.get("id") == wid:
-            found = w
-            break
-    if not found:
-        raise ValueError("Workspace nicht gefunden")
-
-    if "mode" in patch:
-        m = str(patch["mode"]).lower()
-        if m == "r+w":
-            m = "rw"
-        if m in _MODES:
-            found["mode"] = m
-    if "enabled" in patch:
-        found["enabled"] = bool(patch["enabled"])
-    if "name" in patch and str(patch["name"]).strip():
-        found["name"] = str(patch["name"]).strip()[:120]
-    if patch.get("primary") is True:
-        for x in store["workspaces"]:
-            x["primary"] = x.get("id") == wid
-    if "move" in patch:
-        ids = [w["id"] for w in store["workspaces"]]
-        i = ids.index(wid)
-        j = i - 1 if patch["move"] == "up" else i + 1
-        if 0 <= j < len(store["workspaces"]):
-            store["workspaces"][i], store["workspaces"][j] = (
-                store["workspaces"][j],
-                store["workspaces"][i],
-            )
-
-    save_store(store)
+    bind_store.update_item(
+        USER_STORE, "workspaces", wid, patch, extra_keys=EXTRA, **FLAGS
+    )
+    log.log("workspaces_saved", count=len(list_workspaces()))
     item = get_workspace(wid)
     if not item:
         raise ValueError("Workspace nicht gefunden")
