@@ -7,16 +7,11 @@ Nicht in anderen Dateien hart verdrahten — siehe Architektur-Regel.
 """
 import os
 
-# --- Vault-Pfade (Kabelsalat-SoT: ~/.glyph/vaults.json) ---
-# Live-Liste wird von core.vaults_registry.apply_to_config() gesetzt.
-# Fallback nur bis erster Load (Tests / vor Migration).
-VAULT_PATHS = [
-    "/Users/lxndrhbrt/ObsidianVaults/HSEQ Sync",
-    "/Users/lxndrhbrt/ObsidianVaults/ASI, BS. UWS, QM, EM",
-    "/Users/lxndrhbrt/ObsidianVaults/OpenClaw memory-wiki",
-    "/Users/lxndrhbrt/ObsidianVaults/Peniel",
-]
-VAULT_PATH = VAULT_PATHS[0]
+# --- Vault-Pfade ---
+# Live-SoT ist die Registry (~/.glyph/vaults.json via vaults_registry).
+# Import-Default bleibt leer — reload_vault_paths() / apply_to_config() füllt.
+VAULT_PATHS = []
+VAULT_PATH = ""
 
 
 def reload_vault_paths():

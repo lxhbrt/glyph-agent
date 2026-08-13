@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Vault-Registry (Kabelsalat-SoT).
+Vault-Registry (Kabelsalat-SoT) — Adapter auf bind_store.
 
 Nutzer:   ~/.glyph/vaults.json
 Produkt:  ~/.glyph/vaults.defaults.json (leer/minimal, nie Nutzer-Welt überschreiben)
@@ -11,17 +11,19 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import List, Optional
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
-from . import log
+from . import bind_store, log
 
 GLYPH_DIR = os.path.expanduser("~/.glyph")
 USER_STORE = os.path.join(GLYPH_DIR, "vaults.json")
 DEFAULTS_STORE = os.path.join(GLYPH_DIR, "vaults.defaults.json")
 OBSIDIAN_ROOT = os.path.expanduser("~/ObsidianVaults")
+
+EXTRA = ("pins",)
+FLAGS = dict(reorder=True, require_exists=False)
 
 # Seed nur wenn vaults.json fehlt (bestehende Installation migrieren)
 _LEGACY_SEED = [
@@ -57,8 +59,6 @@ _LEGACY_SEED = [
     },
 ]
 
-_MODES = frozenset({"r", "rw", "private"})
-
 # Default-Pins (nutzerunabhängig) — relative Pfade im Vault
 _DEFAULT_PIN_CANDIDATES = (
     "AGENTS.md",
@@ -69,12 +69,9 @@ _DEFAULT_PIN_CANDIDATES = (
     "MEMORY.md",
 )
 
-_mtime_cache: Tuple[float, Optional[dict]] = (0.0, None)
-
 
 def _slug(name: str) -> str:
-    s = re.sub(r"[^a-zA-Z0-9]+", "-", (name or "vault").strip().lower()).strip("-")
-    return (s or "vault")[:48]
+    return bind_store.slug(name, fallback="vault")
 
 
 def _empty_store() -> dict:
@@ -98,25 +95,10 @@ def ensure_defaults_file() -> None:
             f.write("\n")
 
 
-def _normalize_vault(raw: dict, order: int) -> Optional[dict]:
-    if not isinstance(raw, dict):
-        return None
-    path = str(raw.get("path") or "").strip()
-    if not path:
-        return None
-    path = os.path.expanduser(path)
-    try:
-        path = os.path.realpath(path)
-    except OSError:
-        pass
-    name = str(raw.get("name") or os.path.basename(path) or "Vault").strip()
-    mode = str(raw.get("mode") or "r").strip().lower()
-    if mode not in _MODES:
-        mode = "r"
-    pins_in = raw.get("pins") if isinstance(raw.get("pins"), list) else []
+def _sanitize_pins(pins_in) -> list:
     pins = []
     seen_p = set()
-    for p in pins_in:
+    for p in pins_in or []:
         if not isinstance(p, dict):
             continue
         rel = str(p.get("path") or "").strip().replace("\\", "/").lstrip("/")
@@ -130,57 +112,21 @@ def _normalize_vault(raw: dict, order: int) -> Optional[dict]:
                 "source": str(p.get("source") or "manual"),
             }
         )
-    vid = str(raw.get("id") or "").strip() or _slug(name)
-    return {
-        "id": vid,
-        "name": name[:120],
-        "path": path,
-        "mode": mode,
-        "primary": bool(raw.get("primary")),
-        "enabled": raw.get("enabled", True) is not False,
-        "pins": pins,
-        "order": int(raw.get("order", order)),
-        "exists": os.path.isdir(path),
-    }
+    return pins
 
 
 def load_store(*, force: bool = False) -> dict:
     """Lädt Nutzer-SoT; migriert einmalig wenn Datei fehlt."""
-    global _mtime_cache
     ensure_defaults_file()
     os.makedirs(GLYPH_DIR, exist_ok=True)
 
     if not os.path.isfile(USER_STORE):
         store = _migrate_seed()
-        save_store(store)
-        _mtime_cache = (os.path.getmtime(USER_STORE), store)
-        return store
+        return save_store(store)
 
-    try:
-        mtime = os.path.getmtime(USER_STORE)
-    except OSError:
-        mtime = 0.0
-    if not force and _mtime_cache[1] is not None and _mtime_cache[0] == mtime:
-        return _mtime_cache[1]
-
-    try:
-        with open(USER_STORE, encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        data = _empty_store()
-    if not isinstance(data, dict):
-        data = _empty_store()
-    data.setdefault("version", 1)
-    vaults = []
-    for i, raw in enumerate(data.get("vaults") or []):
-        v = _normalize_vault(raw, i)
-        if v:
-            vaults.append(v)
-    # exactly one primary among enabled
-    vaults = _fix_primary(vaults)
-    data["vaults"] = vaults
-    _mtime_cache = (mtime, data)
-    return data
+    return bind_store.load_store(
+        USER_STORE, "vaults", extra_keys=EXTRA, force=force, **FLAGS
+    )
 
 
 def _migrate_seed() -> dict:
@@ -190,61 +136,32 @@ def _migrate_seed() -> dict:
     for i, raw in enumerate(_LEGACY_SEED):
         if os.path.isdir(os.path.expanduser(raw["path"])):
             any_exist = True
-        v = _normalize_vault({**raw, "id": _slug(raw["name"]), "pins": []}, i)
+        v = bind_store.normalize_item(
+            {**raw, "id": _slug(raw["name"]), "pins": []}, i, extra_keys=EXTRA
+        )
         if v and v["exists"]:
             v["pins"] = _auto_pins_for_path(v["path"])
             vaults.append(v)
     if not any_exist:
         return _empty_store()
-    vaults = _fix_primary(vaults)
     log.log("vaults_migrated", count=len(vaults))
     return {"version": 1, "vaults": vaults, "migrated_from": "legacy_config"}
 
 
 def save_store(data: dict) -> dict:
-    global _mtime_cache
-    os.makedirs(GLYPH_DIR, exist_ok=True)
-    vaults = []
-    for i, raw in enumerate(data.get("vaults") or []):
-        v = _normalize_vault(raw, i)
-        if v:
-            vaults.append(v)
-    vaults = _fix_primary(vaults)
-    out = {"version": 1, "vaults": vaults}
+    extra_meta = {}
     if data.get("migrated_from"):
-        out["migrated_from"] = data["migrated_from"]
-    tmp = USER_STORE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(out, f, ensure_ascii=False, indent=2)
-        f.write("\n")
-    os.replace(tmp, USER_STORE)
-    try:
-        mtime = os.path.getmtime(USER_STORE)
-    except OSError:
-        mtime = 0.0
-    _mtime_cache = (mtime, out)
-    log.log("vaults_saved", count=len(vaults))
+        extra_meta["migrated_from"] = data["migrated_from"]
+    out = bind_store.save_store(
+        USER_STORE,
+        data,
+        "vaults",
+        extra_keys=EXTRA,
+        extra_meta=extra_meta or None,
+        **FLAGS,
+    )
+    log.log("vaults_saved", count=len(out.get("vaults") or []))
     return out
-
-
-def _fix_primary(vaults: List[dict]) -> List[dict]:
-    enabled = [v for v in vaults if v.get("enabled", True)]
-    if not enabled:
-        return vaults
-    prim = [v for v in enabled if v.get("primary")]
-    if len(prim) == 1:
-        # keep order but ensure primary first for agent priority
-        pid = prim[0]["id"]
-        rest = [v for v in vaults if v["id"] != pid]
-        head = next(v for v in vaults if v["id"] == pid)
-        return [head] + rest
-    # none or many → first enabled is primary
-    first_id = enabled[0]["id"]
-    for v in vaults:
-        v["primary"] = v["id"] == first_id
-    head = next(v for v in vaults if v["id"] == first_id)
-    rest = [v for v in vaults if v["id"] != first_id]
-    return [head] + rest
 
 
 def list_vaults() -> List[dict]:
@@ -322,7 +239,6 @@ def apply_to_config() -> List[str]:
 
     paths = paths_for_agent()
     if not paths:
-        # Fallback: empty list — agent without vaults
         config.VAULT_PATHS = []
         config.VAULT_PATH = ""
     else:
@@ -435,9 +351,7 @@ def ensure_default_mds(vault_path: str) -> List[str]:
 
 def attach(raw_input: str, mode: str = "r") -> dict:
     parsed = parse_attach_input(raw_input)
-    mode = (mode or "r").lower()
-    if mode not in _MODES:
-        mode = "r"
+    mode = bind_store.normalize_mode(mode or "r")
     store = load_store(force=True)
     path = parsed["path"]
     for v in store.get("vaults") or []:
@@ -451,7 +365,7 @@ def attach(raw_input: str, mode: str = "r") -> dict:
         if not any(p["path"] == rel for p in pins):
             pins.append({"path": rel, "label": os.path.basename(rel), "source": "manual"})
 
-    vault = _normalize_vault(
+    vault = bind_store.normalize_item(
         {
             "id": _slug(parsed["name"]) + "-" + uuid.uuid4().hex[:4],
             "name": parsed["name"],
@@ -462,56 +376,42 @@ def attach(raw_input: str, mode: str = "r") -> dict:
             "enabled": True,
         },
         len(store.get("vaults") or []),
+        extra_keys=EXTRA,
     )
+    if not vault:
+        raise ValueError("Vault konnte nicht angelegt werden")
     store.setdefault("vaults", []).append(vault)
     save_store(store)
     apply_to_config()
-    return {"vault": vault, "created_mds": created_mds}
+    return {"vault": get_vault(vault["id"]) or vault, "created_mds": created_mds}
 
 
 def detach(vid: str) -> bool:
-    store = load_store(force=True)
-    before = len(store.get("vaults") or [])
-    store["vaults"] = [v for v in (store.get("vaults") or []) if v.get("id") != vid]
-    if len(store["vaults"]) == before:
-        return False
-    save_store(store)
-    apply_to_config()
-    return True
+    ok = bind_store.detach_item(
+        USER_STORE, "vaults", vid, extra_keys=EXTRA, **FLAGS
+    )
+    if ok:
+        apply_to_config()
+        log.log("vaults_saved", count=len(list_vaults()))
+    return ok
 
 
 def update_vault(vid: str, patch: dict) -> dict:
-    store = load_store(force=True)
-    found = None
-    for v in store.get("vaults") or []:
-        if v.get("id") == vid:
-            found = v
-            break
-    if not found:
-        raise ValueError("Vault nicht gefunden")
-
-    if "mode" in patch and str(patch["mode"]).lower() in _MODES:
-        found["mode"] = str(patch["mode"]).lower()
-    if "enabled" in patch:
-        found["enabled"] = bool(patch["enabled"])
-    if "name" in patch and str(patch["name"]).strip():
-        found["name"] = str(patch["name"]).strip()[:120]
-    if patch.get("primary") is True:
-        for x in store["vaults"]:
-            x["primary"] = x.get("id") == vid
-    if "pins" in patch and isinstance(patch["pins"], list):
-        found["pins"] = patch["pins"]
-    if "move" in patch:
-        # move: "up" | "down"
-        ids = [v["id"] for v in store["vaults"]]
-        i = ids.index(vid)
-        j = i - 1 if patch["move"] == "up" else i + 1
-        if 0 <= j < len(store["vaults"]):
-            store["vaults"][i], store["vaults"][j] = store["vaults"][j], store["vaults"][i]
-
-    save_store(store)
+    bind_store.update_item(
+        USER_STORE, "vaults", vid, patch, extra_keys=EXTRA, **FLAGS
+    )
+    if "pins" in (patch or {}) and isinstance(patch["pins"], list):
+        store = load_store(force=True)
+        for v in store.get("vaults") or []:
+            if v.get("id") == vid:
+                v["pins"] = _sanitize_pins(patch["pins"])
+                break
+        save_store(store)
     apply_to_config()
-    return get_vault(vid)
+    item = get_vault(vid)
+    if not item:
+        raise ValueError("Vault nicht gefunden")
+    return item
 
 
 def add_pin(vid: str, rel_path: str, label: str = "") -> dict:
@@ -534,7 +434,7 @@ def add_pin(vid: str, rel_path: str, label: str = "") -> dict:
         )
         v["pins"] = pins
         save_store(store)
-        return v
+        return get_vault(vid) or v
     raise ValueError("Vault nicht gefunden")
 
 
@@ -546,7 +446,7 @@ def remove_pin(vid: str, rel_path: str) -> dict:
             continue
         v["pins"] = [p for p in (v.get("pins") or []) if p.get("path") != rel]
         save_store(store)
-        return v
+        return get_vault(vid) or v
     raise ValueError("Vault nicht gefunden")
 
 

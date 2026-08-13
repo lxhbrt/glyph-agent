@@ -2,6 +2,12 @@
 
 Lokale Engine hinter dem Glyph-Profil **glyph-agent**: Vault-Gedächtnis, Recherche-Tools und Cloud-Antwort. Eigenes Domänenvokabular — getrennt von Glyph-UI.
 
+## System map
+
+| Node | Tut | Quellen |
+|------|-----|---------|
+| **Bind-Store** | Persistenz + Kern-PATCH für Vaults+Workspaces | `core/bind_store.py` |
+
 ## Language
 
 **Nutzerantworten:** stop-slop (immer) — Kern zuerst, kein AI-Slop, keine erfundenen Normen.

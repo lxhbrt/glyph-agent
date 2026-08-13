@@ -33,13 +33,16 @@ _SKIP_DIR_NAMES = {
 
 
 def workspace_roots():
-    """Kanonische erlaubte Roots (realpath) — SoT workspaces.json, Fallback Env/Config."""
+    """Kanonische erlaubte Roots (realpath) — SoT workspaces.json, Fallback Env/Config.
+
+    Store geladen + nichts accessible → [] (kein Default-rw).
+    CODE_WORKSPACE_ROOTS nur wenn Store fehlt oder CODE_WORKSPACES_USE_REGISTRY=false.
+    """
     if getattr(config, "CODE_WORKSPACES_USE_REGISTRY", True):
         try:
             from . import workspaces_registry as wr
-            roots = wr.accessible_roots()
-            if roots:
-                return list(roots)
+            wr.load_store()  # Datei existiert oder wurde geseedet
+            return list(wr.accessible_roots())  # auch []
         except Exception:
             pass
     roots = []
