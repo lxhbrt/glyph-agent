@@ -32,6 +32,15 @@ def slug(name: str, fallback: str = "item") -> str:
     return (s or fallback)[:48]
 
 
+def _safe_order(value, fallback: int) -> int:
+    try:
+        if value is None:
+            return int(fallback)
+        return int(value)
+    except (TypeError, ValueError):
+        return int(fallback)
+
+
 def normalize_item(raw: dict, order: int, *, extra_keys: tuple = ()) -> Optional[dict]:
     """Kernfelder + Extras; hängt immer live exists an (Runtime)."""
     if not isinstance(raw, dict):
@@ -53,7 +62,7 @@ def normalize_item(raw: dict, order: int, *, extra_keys: tuple = ()) -> Optional
         "mode": normalize_mode(raw.get("mode") or "r"),
         "primary": bool(raw.get("primary")),
         "enabled": raw.get("enabled", True) is not False,
-        "order": int(raw.get("order", order)),
+        "order": _safe_order(raw.get("order", order), order),
         "exists": os.path.isdir(path),
     }
     for k in extra_keys:
@@ -71,7 +80,7 @@ def to_disk(item: dict, *, extra_keys: tuple = ()) -> dict:
         "mode": normalize_mode(item.get("mode") or "r"),
         "primary": bool(item.get("primary")),
         "enabled": item.get("enabled", True) is not False,
-        "order": int(item.get("order", 0)),
+        "order": _safe_order(item.get("order", 0), 0),
     }
     for k in extra_keys:
         if k in item:
@@ -157,7 +166,10 @@ def load_store(
     data.setdefault("version", 1)
     items: List[dict] = []
     for i, raw in enumerate(data.get(list_key) or []):
-        item = normalize_item(raw, i, extra_keys=extra_keys)
+        try:
+            item = normalize_item(raw, i, extra_keys=extra_keys)
+        except Exception:
+            continue
         if item:
             items.append(item)
     data[list_key] = fix_primary(
@@ -181,7 +193,10 @@ def save_store(
     os.makedirs(os.path.dirname(os.path.abspath(user_store)) or ".", exist_ok=True)
     items: List[dict] = []
     for i, raw in enumerate(data.get(list_key) or []):
-        item = normalize_item(raw, i, extra_keys=extra_keys)
+        try:
+            item = normalize_item(raw, i, extra_keys=extra_keys)
+        except Exception:
+            continue
         if item:
             items.append(item)
     items = fix_primary(items, reorder=reorder, require_exists=require_exists)

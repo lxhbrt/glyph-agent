@@ -407,6 +407,8 @@ def update_vault(vid: str, patch: dict) -> dict:
                 v["pins"] = _sanitize_pins(patch["pins"])
                 break
         save_store(store)
+    else:
+        log.log("vaults_saved", count=len(list_vaults()))
     apply_to_config()
     item = get_vault(vid)
     if not item:

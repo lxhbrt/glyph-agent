@@ -190,8 +190,20 @@ def build_index_from_vault(vault_path=None, quiet=False):
     from . import config as _config
     from . import vault_tools as _vt
 
-    roots = [vault_path] if vault_path else list(getattr(_config, "VAULT_PATHS", [_config.VAULT_PATH]))
+    if vault_path:
+        roots = [vault_path]
+    else:
+        roots = list(getattr(_config, "VAULT_PATHS", None) or [])
+        if not any(r for r in roots if r):
+            try:
+                _config.reload_vault_paths()
+            except Exception:
+                pass
+            roots = list(getattr(_config, "VAULT_PATHS", None) or [])
     roots = [_os.path.realpath(r) for r in roots if r]
+    if not roots:
+        # Leere Roots dürfen den Index nicht als „alles gelöscht“ wischen.
+        return {"error": "keine Vault-Pfade — Index unverändert"}
     # Private vaults: lesbar per ReadNote, aber nicht in Embedding-Index
     try:
         from . import vaults_registry as _vr

@@ -2,8 +2,8 @@
 """
 Konfiguration des persönlichen lokalen Assistenten (glyph-agent).
 
-Diese Datei ist der EINZIGE Ort, an dem der Vault-Pfad zentral gesetzt wird.
-Nicht in anderen Dateien hart verdrahten — siehe Architektur-Regel.
+Live-SoT der Vault-Pfade ist die Registry (~/.glyph/vaults.json).
+Import-Default: VAULT_PATHS = [] — reload_vault_paths() / apply_to_config() füllt.
 """
 import os
 

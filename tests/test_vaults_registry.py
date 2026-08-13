@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 from core import bind_store, config
 
@@ -148,6 +149,38 @@ class VaultsRegistryTest(unittest.TestCase):
         paths = [p["path"] for p in updated.get("pins") or []]
         self.assertEqual(paths, ["note.md"])
         self.assertNotIn("bogus", updated)
+
+    def test_bad_order_falls_back_to_index(self):
+        vr = self.vr
+        vr.attach(self.va, mode="r")
+        with open(self.store, encoding="utf-8") as f:
+            disk = json.load(f)
+        disk["vaults"][0]["order"] = None
+        with open(self.store, "w", encoding="utf-8") as f:
+            json.dump(disk, f)
+        bind_store._mtime_cache.clear()
+        loaded = vr.load_store(force=True)
+        self.assertEqual(loaded["vaults"][0]["order"], 0)
+
+    def test_empty_roots_do_not_wipe_index(self):
+        from core import retrieval
+
+        idx = os.path.join(self.root, "vault_index.json")
+        with open(idx, "w", encoding="utf-8") as f:
+            json.dump({"docs": [{"path": "/keep/me.md", "hash": "x"}]}, f)
+        old_index = retrieval.INDEX_PATH
+        try:
+            retrieval.INDEX_PATH = idx
+            with mock.patch.object(config, "reload_vault_paths", return_value=[]):
+                config.VAULT_PATHS = []
+                config.VAULT_PATH = ""
+                stats = retrieval.build_index_from_vault(quiet=True)
+            self.assertIn("error", stats)
+            with open(idx, encoding="utf-8") as f:
+                kept = json.load(f)
+            self.assertEqual(kept["docs"][0]["path"], "/keep/me.md")
+        finally:
+            retrieval.INDEX_PATH = old_index
 
 
 if __name__ == "__main__":

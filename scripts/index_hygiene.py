@@ -18,6 +18,8 @@ sys.path.insert(0, ROOT)
 
 from core import config  # noqa: E402
 
+config.reload_vault_paths()
+
 # Muster, die im Wiki/Index heikel sind (Lektion OpenClaw unsafe-local / Privat-Spiegel)
 # Nicht: generische HSEQ-unsafe-local-themen/schulung (Fachkopien).
 HEIKLE_PATTERNS = [
@@ -111,7 +113,7 @@ def main():
         "recommendation": (
             "Heikle Wiki-Sources manuell prüfen/löschen (OpenClaw-Ingest). "
             "Privat-Vault nicht in VAULT_PATHS. Nach Bereinigung: "
-            "python3 -c 'from core.retrieval import build_index_from_vault; print(build_index_from_vault(quiet=True))'"
+            "python3 -c 'from core import config; from core.retrieval import build_index_from_vault; config.reload_vault_paths(); print(build_index_from_vault(quiet=True))'"
         ),
     }
     out_path = os.path.join(ROOT, "logs", "index_hygiene_report.json")

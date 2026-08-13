@@ -43,7 +43,7 @@ _Avoid_: „3-Stufen-Fallback“ / lokaler Chat-Fallback (existiert nicht mehr; 
 
 - **glyph-agent Default** bleibt **Vault-only** (kein Shell, kein allgemeines Repo-Schreiben).
 - **`MODE=code`** (per Request `mode: "code"`): ^_Code-Pfad — Tools `ListDir` / `ReadFile` / `Grep` / `SearchReplace` / `WriteFile` / `RunCommand`, Denker `CODE_OPENROUTER_MODEL` (Default `deepseek/deepseek-v4-flash-0731`).
-- **Workspaces-SoT:** `~/.glyph/workspaces.json` (Modes `r` / `rw` / `private`); Registry `core/workspaces_registry.py`. Fallback: `CODE_WORKSPACE_ROOTS`.
+- **Workspaces-SoT:** `~/.glyph/workspaces.json` (Modes `r` / `rw` / `private`); Registry `core/workspaces_registry.py`. Fallback `CODE_WORKSPACE_ROOTS` nur wenn Store fehlt oder `CODE_WORKSPACES_USE_REGISTRY=false`; geladene leere/disabled Registry ist `[]`.
 - Write/SearchReplace unter **`r+w` ohne Popup**. Whitelist-Shell unter `r+w` ohne Popup.
 - **Elevated** braucht Glyph-Popup (`pending_confirmation` + `resume_token`): `git push|pull|fetch`, Compound, `npm run service:*`. Kein Session-Always für elevated.
 - Fail nach Allow / unter r+w: **hard_error** + Banner (echter Grund). Hart-Deny: `rm`/`sudo`/… bleibt tot.

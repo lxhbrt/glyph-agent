@@ -273,6 +273,7 @@ def update_workspace(wid: str, patch: dict) -> dict:
     bind_store.update_item(
         USER_STORE, "workspaces", wid, patch, extra_keys=EXTRA, **FLAGS
     )
+    log.log("workspaces_saved", count=len(list_workspaces()))
     item = get_workspace(wid)
     if not item:
         raise ValueError("Workspace nicht gefunden")

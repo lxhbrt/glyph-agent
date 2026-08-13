@@ -155,6 +155,21 @@ class WorkspacesRegistryTest(unittest.TestCase):
         loaded = wr.load_store(force=True)
         self.assertTrue(loaded["workspaces"][0]["exists"])
 
+    def test_bad_order_does_not_fall_through_to_default_roots(self):
+        wr = self.wr
+        wr.attach(self.ws_a, mode="rw")
+        with open(self.store, encoding="utf-8") as f:
+            disk = json.load(f)
+        disk["workspaces"][0]["order"] = "nope"
+        with open(self.store, "w", encoding="utf-8") as f:
+            json.dump(disk, f)
+        bind_store._mtime_cache.clear()
+        config.CODE_WORKSPACES_USE_REGISTRY = True
+        config.CODE_WORKSPACE_ROOTS = [self.ws_b]
+        loaded = wr.load_store(force=True)
+        self.assertEqual(loaded["workspaces"][0]["order"], 0)
+        self.assertEqual(code_tools.workspace_roots(), [self.ws_a])
+
     def test_cache_after_save_has_live_exists(self):
         wr = self.wr
         wr.attach(self.ws_a, mode="rw")
