@@ -680,6 +680,26 @@ def main():
                 except Exception as e:
                     self._send(500, {"ok": False, "error": str(e)})
                 return
+            if path.startswith("/vaults/") and path.count("/") >= 2:
+                parts = path.rstrip("/").split("/")
+                if len(parts) >= 4 and parts[1] == "vaults" and parts[3] == "pins":
+                    vid = parts[2]
+                    payload, err = _read_json_body(self)
+                    if err:
+                        self._send(400, {"error": err, "ok": False})
+                        return
+                    try:
+                        item = agent_vaults.add_pin(
+                            vid,
+                            str((payload or {}).get("path") or ""),
+                            str((payload or {}).get("label") or ""),
+                        )
+                        self._send(200, {"ok": True, "vault": item})
+                    except ValueError as e:
+                        self._send(400, {"ok": False, "error": str(e)})
+                    except Exception as e:
+                        self._send(500, {"ok": False, "error": str(e)})
+                    return
             if path in ("/workspaces", "/workspaces/"):
                 payload, err = _read_json_body(self)
                 if err:

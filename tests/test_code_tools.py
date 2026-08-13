@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """Unit tests for CODE-Tools (Workspace + Shell-Whitelist + Grep/SearchReplace)."""
+import json
 import os
 import sys
 import tempfile
@@ -223,6 +224,50 @@ class CodeToolsTests(unittest.TestCase):
         roots = code_tools.workspace_roots()
         for r in roots:
             self.assertTrue(os.path.isdir(r), r)
+
+
+class EmptyRegistryRootsTests(unittest.TestCase):
+    """Store geladen + nichts accessible → workspace_roots() == [] (kein Default-rw)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = self._tmp.name
+        self.store = os.path.join(self.root, "workspaces.json")
+        self.ws = os.path.realpath(os.path.join(self.root, "only"))
+        os.makedirs(self.ws)
+
+        import core.workspaces_registry as wr
+        from core import bind_store
+
+        self.wr = wr
+        self.bind_store = bind_store
+        self._orig_dir = wr.GLYPH_DIR
+        self._orig_store = wr.USER_STORE
+        self._old_reg = getattr(config, "CODE_WORKSPACES_USE_REGISTRY", True)
+        self._old_roots = list(config.CODE_WORKSPACE_ROOTS)
+        wr.GLYPH_DIR = self.root
+        wr.USER_STORE = self.store
+        bind_store._mtime_cache.clear()
+        with open(self.store, "w", encoding="utf-8") as f:
+            json.dump({"version": 1, "workspaces": []}, f)
+        config.CODE_WORKSPACES_USE_REGISTRY = True
+        config.CODE_WORKSPACE_ROOTS = [os.path.realpath(self.root)]
+
+    def tearDown(self):
+        self.wr.GLYPH_DIR = self._orig_dir
+        self.wr.USER_STORE = self._orig_store
+        config.CODE_WORKSPACES_USE_REGISTRY = self._old_reg
+        config.CODE_WORKSPACE_ROOTS = self._old_roots
+        self.bind_store._mtime_cache.clear()
+        self._tmp.cleanup()
+
+    def test_disable_last_rw_roots_empty(self):
+        item = self.wr.attach(self.ws, mode="rw")["workspace"]
+        self.assertEqual(code_tools.workspace_roots(), [self.ws])
+        self.wr.update_workspace(item["id"], {"enabled": False})
+        self.assertEqual(code_tools.workspace_roots(), [])
+        # Fallback-Roots dürfen nicht aufgehen
+        self.assertNotIn(os.path.realpath(self.root), code_tools.workspace_roots())
 
 
 class AgentToolsExtTests(unittest.TestCase):

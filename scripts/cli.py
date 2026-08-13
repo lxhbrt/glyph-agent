@@ -29,6 +29,7 @@ try:
     dotenv.load_ui_bindings()
 except Exception:
     pass
+config.reload_vault_paths()
 
 USAGE = __doc__
 

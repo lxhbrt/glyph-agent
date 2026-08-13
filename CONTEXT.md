@@ -16,6 +16,7 @@ Lokale Engine hinter dem Glyph-Profil **glyph-agent**: Vault-Gedächtnis, Recher
 | **Agent-Loop** | B+: VaultFind → Tools → Cloud-Denker | `core/tool_loop.py`, `core/agent.py` | retrieval, research, vault_tools |
 | **Code-Loop** | ^_Code: Read/Write/Grep/Shell, Confirm/Elevated | `core/code_loop.py`, `core/code_tools.py` | `workspaces_registry` |
 | **Tools-Registry** | Tool-Namen, Schemas, Dispatch | `core/tool_registry.py` | tool_loop / code_loop |
+| **Bind-Store** | Persistenz + Kern-PATCH für Vaults+Workspaces | `core/bind_store.py` | vaults_registry, workspaces_registry |
 | **Vaults** | `~/.glyph/vaults.json`, Pins, Privat-Block | `core/vaults_registry.py` | Index, VaultFind |
 | **Workspaces** | `~/.glyph/workspaces.json` r/r+w/🔒 | `core/workspaces_registry.py` | code_tools Pfadchecks |
 | **Retrieval** | Embeddings `bge-m3` + Keyword hybrid | `core/retrieval.py` | Ollama lokal |
@@ -74,7 +75,7 @@ _Avoid_: „3-Stufen-Fallback“ / lokaler Chat-Fallback (existiert nicht mehr; 
 
 - **glyph-agent Default** bleibt **Vault-only** (kein Shell, kein allgemeines Repo-Schreiben).
 - **`MODE=code`** (per Request `mode: "code"`): ^_Code-Pfad — Tools `ListDir` / `ReadFile` / `Grep` / `SearchReplace` / `WriteFile` / `RunCommand`, Denker `CODE_OPENROUTER_MODEL` (Default `deepseek/deepseek-v4-flash-0731`).
-- **Workspaces-SoT:** `~/.glyph/workspaces.json` (Modes `r` / `rw` / `private`); Registry `core/workspaces_registry.py`. Fallback: `CODE_WORKSPACE_ROOTS`.
+- **Workspaces-SoT:** `~/.glyph/workspaces.json` (Modes `r` / `rw` / `private`); Registry `core/workspaces_registry.py`. Fallback `CODE_WORKSPACE_ROOTS` nur wenn Store fehlt oder `CODE_WORKSPACES_USE_REGISTRY=false`; geladene leere/disabled Registry ist `[]`.
 - Write/SearchReplace unter **`r+w` ohne Popup**. Whitelist-Shell unter `r+w` ohne Popup.
 - **Elevated** braucht Glyph-Popup (`pending_confirmation` + `resume_token`): `git push|pull|fetch`, Compound, `npm run service:*`. Kein Session-Always für elevated.
 - Fail nach Allow / unter r+w: **hard_error** + Banner (echter Grund). Hart-Deny: `rm`/`sudo`/… bleibt tot.
