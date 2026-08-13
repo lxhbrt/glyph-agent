@@ -20,6 +20,65 @@ import time
 
 from . import config, log
 
+# Einzige Nicht-Vault-Schreibdatei für °_Agent: Vorschläge, die den Chat überleben.
+PENDING_CONTRACT = os.path.expanduser("~/.glyph/memory/pending-contract.md")
+
+
+def pending_contract_abs():
+    override = (os.environ.get("GLYPH_PENDING_CONTRACT") or "").strip()
+    if override:
+        return os.path.abspath(os.path.expanduser(override))
+    return os.path.abspath(os.path.expanduser(PENDING_CONTRACT))
+
+
+def _is_pending_contract_ref(raw):
+    s = (raw or "").strip().replace("\\", "/")
+    if not s:
+        return False
+    aliases = {
+        "pending-contract.md",
+        "memory/pending-contract.md",
+        "~/.glyph/memory/pending-contract.md",
+        PENDING_CONTRACT.replace("\\", "/"),
+        pending_contract_abs().replace("\\", "/"),
+    }
+    if s in aliases or os.path.basename(s) == "pending-contract.md" and (
+        s.endswith("memory/pending-contract.md") or s.endswith(".glyph/memory/pending-contract.md")
+    ):
+        return True
+    try:
+        cand = os.path.realpath(os.path.expanduser(s))
+    except OSError:
+        return False
+    return cand == os.path.realpath(pending_contract_abs())
+
+
+def pending_contract_prompt_block(max_body=900):
+    """Prompt-Block nur wenn echte Vorschlags-Bullets da sind."""
+    path = pending_contract_abs()
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            body = f.read().strip()
+    except OSError:
+        return None
+    if not body:
+        return None
+    items = [
+        ln for ln in body.splitlines()
+        if ln.startswith("- ") and " · " in ln
+    ]
+    if not items:
+        return None
+    if len(body) > max_body:
+        body = body[: max_body - 20] + "\n…[gekürzt]"
+    return (
+        "### Offene Vertragsvorschläge · ~/.glyph/memory/pending-contract.md\n"
+        "Chat speichert nichts. Ja = Ziel schreiben + Bullet hier streichen.\n"
+        + body
+    )
+
 
 # --- Pfad-Sicherheit ---
 
@@ -42,6 +101,8 @@ def _resolve_vault_path(relative_or_abs):
     raw = (relative_or_abs or "").strip()
     if not raw:
         return None
+    if _is_pending_contract_ref(raw):
+        return pending_contract_abs()
     if os.path.isabs(raw):
         cand = os.path.realpath(raw)
         for v in vault_roots:
@@ -85,6 +146,8 @@ def _root_for_path(abs_path):
 
 def _rel_to_root(resolved):
     """Relativer Pfad eines absoluten Vault-Pfads zu seinem Vault-Root (mit Vault-Präfix)."""
+    if _is_pending_contract_ref(resolved):
+        return "~/.glyph/memory/pending-contract.md"
     root = _root_for_path(resolved)
     if root:
         rel = os.path.relpath(resolved, root)
@@ -579,8 +642,10 @@ def apply_edit(path, new_content):
 
         if _vr.is_private_path(resolved):
             raise ValueError("Privat-Vault: Schreiben gesperrt (Schloss)")
+        if _is_pending_contract_ref(resolved):
+            pass
         # mode r: block writes unless under classic HSEQ job prefixes (handled by jobs)
-        if not _vr.is_writable_path(resolved):
+        elif not _vr.is_writable_path(resolved):
             # still allow if vault mode is rw only
             modes_ok = False
             for v in _vr.list_vaults():

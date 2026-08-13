@@ -2,6 +2,36 @@
 
 Lokale Engine hinter dem Glyph-Profil **glyph-agent**: Vault-Gedächtnis, Recherche-Tools und Cloud-Antwort. Eigenes Domänenvokabular — getrennt von Glyph-UI.
 
+## Orient (für ^_Code / Agenten)
+
+1. Diese Datei zuerst lesen — **nicht** blind ListDir/Grep über `core/`.
+2. Aufgabe → **Node** → nur deren Quellen. MODE entscheidet den Pfad (`agent` vs `code`).
+3. Neue Route/Tool/Registry → Map hier updaten; SoT-Pfade (`~/.glyph/*`) nicht im Code hardcoden ohne Registry.
+
+## System map
+
+| Node | Tut | Quellen | Hängt an / produziert |
+|------|-----|---------|------------------------|
+| **HTTP** | `/chat`, `/health`, vaults/workspaces/recurring CRUD | `server.py` | alle Loops |
+| **Agent-Loop** | B+: VaultFind → Tools → Cloud-Denker | `core/tool_loop.py`, `core/agent.py` | retrieval, research, vault_tools |
+| **Code-Loop** | ^_Code: Read/Write/Grep/Shell, Confirm/Elevated | `core/code_loop.py`, `core/code_tools.py` | `workspaces_registry` |
+| **Tools-Registry** | Tool-Namen, Schemas, Dispatch | `core/tool_registry.py` | tool_loop / code_loop |
+| **Vaults** | `~/.glyph/vaults.json`, Pins, Privat-Block | `core/vaults_registry.py` | Index, VaultFind |
+| **Workspaces** | `~/.glyph/workspaces.json` r/r+w/🔒 | `core/workspaces_registry.py` | code_tools Pfadchecks |
+| **Retrieval** | Embeddings `bge-m3` + Keyword hybrid | `core/retrieval.py` | Ollama lokal |
+| **Research** | Exa grob, TinyFish fein | `core/research.py`, `core/web.py` | tool_loop |
+| **Recurring/Jobs** | Plan, Catch-up, HSEQ-Seeds | `core/recurring.py`, `jobs/`, `scripts/` | `jobs/recurring.json` |
+| **LLM/Provider** | Direct Pro/Flash → OpenRouter 0731 | `core/llm.py`, `core/providers/` | config, Bindings |
+| **Config** | Env, Models, Ports | `core/config.py`, `core/dotenv.py` | alles |
+| **Verfassung** | B+-Regeln, Tabus | `CONSTITUTION.md` + **diese** CONTEXT | `~/.glyph/AGENTS.md`, MEMORY |
+
+**Zwei Kontexte:** UI-Begriffe → `~/glyph-ui/CONTEXT.md`. Engine hier. Nicht vermischen.
+
+**Crux:**  
+- Write flüssig nur unter Workspace **`r+w`**; Elevated = `pending_confirmation` + `resume_token` (UI-Popup).  
+- °_Agent default **kein Shell**. Shell nur `MODE=code`.  
+- Embeddings **nur** lokal `bge-m3` — nie Cloud-Embedding.
+
 ## Language
 
 **Nutzerantworten:** stop-slop (immer) — Kern zuerst, kein AI-Slop, keine erfundenen Normen.
@@ -24,7 +54,14 @@ _Avoid_: OpenRouter-Profil (entfernt)
 
 **B+**:
 Aktuelle Architektur: lokal Gedächtnis/Suche, Web nur bei Bedarf, Cloud-Denker formuliert, Antwort + Trace.
-_Avoid_: „3-Stufen-Fallback“ / lokaler Chat-Fallback (existiert nicht mehr; nur DeepSeek V4 Flash → free)
+_Avoid_: „3-Stufen-Fallback“ / lokaler Chat-Fallback (existiert nicht mehr; Direct Pro → OpenRouter Flash)
+
+## Settled decisions (Direct-Hop 2026-08-12)
+
+- °_Agent: Direct `deepseek-v4-pro` → OpenRouter `deepseek/deepseek-v4-flash-0731`.
+- ^_Code: Direct `deepseek-v4-flash` → derselbe OpenRouter-0731.
+- Key: `DIRECT_API_KEY` (Alias `DEEPSEEK_API_KEY`) + `DIRECT_API_URL` (Default `https://api.deepseek.com`). OpenAI-kompatibel, nicht DeepSeek-exklusiv.
+- Thinking = API-Default. Chat `EXTERNAL_MAX_CHARS=8000`. Kein Tiny/Free.
 
 ## Settled decisions (grill 2026-08-05)
 
@@ -57,6 +94,7 @@ _Avoid_: „3-Stufen-Fallback“ / lokaler Chat-Fallback (existiert nicht mehr; 
 
 - Pro-Vault-Vertrag: `HSEQ Sync/AGENTS.md`; Wiki: erweiterte `memory-wiki/AGENTS.md` (Ingest ≥1 Synthese-Seite).
 - Skills: `vault-ingest`, `merken` (+ bestehende hseq-*); IDs Alias `hseq-*` = recurring `td-*`.
+- merken (2026-08-13): Schicht-Router — HSEQ-Themen / MEMORY §2 / Repo-CONTEXT / AGENTS nach Ja. Was nicht sofort ins Ziel darf → `~/.glyph/memory/pending-contract.md` (°_Agent darf genau diese eine Datei außerhalb der Vaults).
 - Handover: Pflicht-**3-Zeilen-Briefing** (Neu / Offen / Konflikt-Stale); Eingang+Log = Beleg, nicht Offen.
 - Index: `_is_blocked` + Hygiene blocken heikle Privat-/Behörden-Pfadmuster (nicht alle `unsafe-local-*`).
 - Privat bleibt außerhalb `VAULT_PATHS` (Red Line).
@@ -82,6 +120,17 @@ _Avoid_: „3-Stufen-Fallback“ / lokaler Chat-Fallback (existiert nicht mehr; 
 - SoT `~/.glyph/workspaces.json`; nur Profil **`^_Code`** (Grok unberührt).
 - Defaults: glyph-ui + glyph-agent = `r+w`; openclaw-workspace = `r`.
 - Write flüssig unter r+w; Popup nur elevated; hart-deny bleibt; Fail = hard stop + Banner.
+
+## Settled decisions (^_Code Loop — Grill 2026-08-13)
+
+- **Job:** Mehrdatei E2E (lesen → schreiben → Whitelist-Test → kurz sagen).
+- **Verlauf:** echte `messages[]` an Direct/OpenRouter. Budget `CODE_MESSAGE_CHARS` (64k). Älteste Turns weg; **erstes User + letztes Tool-Ergebnis bleiben**. Kein Flatten, das neue Ergebnisse abschneidet.
+- **Orient:** alle **r+w**-`CONTEXT.md` (Abschnitte Orient + System map) im System-Prompt. `r`-Roots eine Zeile. Kein Blind-Grep.
+- **Denker:** Flash bleibt; kein Provider-Wechsel ohne neuen Beleg.
+- **Runden:** `CODE_MAX_ROUNDS=32`. Timeout 180s.
+- **SearchReplace 0×/N×:** zurück in die Loop. Hart tot nur Deny / 🔒 / Nutzer-Ablehnung / Shell-Timeout / Test-Fail.
+- **Grep/ListDir 3× gleich:** nicht ausführen — „Map nutzen oder antworten“.
+- **Nach Write/Replace:** `npm test` oder `pytest` im angebundenen Root (Whitelist, kein Popup). `npm run service:*` bleibt Elevated.
 
 ## Settled decisions (^_Code Workspaces Phase 2 — 2026-08-11)
 

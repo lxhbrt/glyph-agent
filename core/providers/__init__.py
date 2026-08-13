@@ -3,10 +3,11 @@
 ModelProvider — stabile Modell-Schnittstelle (austauschbarer Modell-Adapter).
 
 Der Agent (core/agent.py) spricht NUR mit dieser Schnittstelle, nie direkt
-mit einem konkreten Provider. Chat-Denker laufen über OpenRouter (Luna → free).
+mit einem konkreten Provider. Chat-Denker: Direct Pro/Flash → OpenRouter Flash-0731.
 
     Agent
      └── ModelProvider            <-- diese Datei (Schnittstelle)
+           ├── DirectProvider     <-- core/providers/direct.py
            ├── OpenRouterProvider <-- core/providers/openrouter.py
            └── FallbackProvider   <-- core/providers/fallback.py (Alias-Kette)
 
@@ -36,4 +37,4 @@ class ModelProvider(ABC):
     @property
     @abstractmethod
     def model_name(self):
-        """Z. B. 'deepseek/deepseek-v4-flash-0731' oder Kette 'flash → free'."""
+        """Z. B. 'deepseek-v4-pro' oder Kette 'pro → flash-0731'."""

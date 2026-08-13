@@ -25,6 +25,10 @@ from core import config, vault_tools, agent
 from core import dotenv
 
 dotenv.load_dotenv()  # optionale .env laden (EXA_API_KEY etc.), Umgebung gewinnt
+try:
+    dotenv.load_ui_bindings()
+except Exception:
+    pass
 
 USAGE = __doc__
 

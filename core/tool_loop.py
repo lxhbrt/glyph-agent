@@ -5,7 +5,7 @@ Kontrollierter Agenten-Loop (Tool-Orchestrierung).
 Ablauf für eine Nutzer-Anfrage:
 
     Nutzer -> Loop
-      1. Cloud-Denker fragen (System-Prompt mit Tool-Schema; OpenRouter Luna → free)
+      1. Cloud-Denker fragen (System-Prompt mit Tool-Schema; Direct Pro → OpenRouter Flash)
       2. Antwort parsen:
            a) Tool-Call (JSON) -> Tool validieren + args prüfen + ausführen
               (write-Tools brauchen confirm-Callback)
@@ -23,6 +23,30 @@ from . import llm, tool_registry, log, config
 from . import routing, retrieval, web, research
 
 MAX_ROUNDS = 4
+
+
+def _maybe_emit_tool_reply_draft(emit, reply):
+    """Streamt Zwischen-Prosa vor einem Tool-Call als draft (nicht reines Tool-JSON/DSML)."""
+    if not callable(emit):
+        return
+    text = (reply or "").strip()
+    if not text:
+        return
+    if tool_registry.looks_like_dsml(text):
+        prose = tool_registry.prose_before_dsml(text)
+        if prose and len(prose) > 8:
+            emit({"type": "draft", "status": "content", "text": prose})
+        return
+    # Typisches reines Tool-JSON: {"tool": "...", "args": {...}}
+    if text.startswith("{") and '"tool"' in text and len(text) < 4000:
+        try:
+            import json as _json
+            obj = _json.loads(text)
+            if isinstance(obj, dict) and obj.get("tool"):
+                return
+        except Exception:
+            pass
+    emit({"type": "draft", "status": "content", "text": text})
 
 
 def _build_trace(tool_calls, tool_results=None, fallback_used=None, steps=None):
@@ -47,7 +71,11 @@ def _build_trace(tool_calls, tool_results=None, fallback_used=None, steps=None):
     if fallback_used is None:
         last = getattr(provider, "last_used", None)
         # Free-Modell hinter Luna = sichtbarer Fallback (kein lokaler Chat).
-        fallback_used = bool(last == "openrouter:free")
+        pname = getattr(provider, "provider_name", "")
+        if pname == "direct":
+            fallback_used = last not in (None, "direct")
+        else:
+            fallback_used = bool(last == "openrouter:free")
     # Ergebnis-Längen aus tool_results (volles Ergebnis), nicht aus tool_calls (nur meta).
     result_by_tool = {}
     for tr in tool_results or []:
@@ -172,12 +200,18 @@ STOP_SLOP = (
 )
 
 # Basis-System-Prompt (B+: Cloud-Denker + lokales Vault-Gedächtnis)
-_ROLE = (
+def _role():
+    primary = getattr(config, "AGENT_OPENROUTER_MODEL", "deepseek-v4-pro")
+    fallback = (
+        getattr(config, "AGENT_OPENROUTER_FALLBACK_MODEL", None)
+        or "deepseek/deepseek-v4-flash-0731"
+    )
+    return (
     "Du bist der glyph-agent (B+): Cloud-Denker mit lokalem Obsidian-Gedächtnis "
     "(HSEQ: Arbeitssicherheit, Umwelt, Qualität, Brandschutz).\n"
     "IDENTITÄT:\n"
-    "- Profil: glyph-agent. Cloud-Denker: deepseek/deepseek-v4-flash-0731 (OpenRouter), "
-    "Free-Fallback: inclusionai/ling-3.0-flash:free. Kein lokaler Chat.\n"
+    f"- Profil: glyph-agent. Cloud-Denker: {primary} (Direct), "
+    f"Fallback: {fallback} (OpenRouter). Kein Tiny/Free. Kein lokaler Chat.\n"
     "- Bei Modell-/Identitätsfragen und Follow-ups dazu: aus Runtime wissen "
     "(Profil + aktuelles Modell), FREI und natürlich formulieren — kein starres "
     "Template, kein Vault/Wiki/Tool. Nicht 'steht nicht im Tool-Ergebnis'.\n"
@@ -202,6 +236,9 @@ _ROLE = (
     "Wiki-Status: WikiStatus. Kein Shell.\n"
     "- Skills (Glyph Slash, wenn Nutzer sie triggert): hseq-eingang, hseq-handover, "
     "hseq-aus-fertig-lernen, vault-ingest, merken — Prompts unter HSEQ Sync/Vorlagen/Jobs/.\n"
+    "- KORREKTUR: Chat vs. AGENTS/CONTEXT → Konflikt nennen, Vertrag gewinnt. "
+    "Vorschlag nicht nur in den Chat: ApplyEdit auf ~/.glyph/memory/pending-contract.md "
+    "(eine Bullet). AGENTS/MEMORY nur nach Auftrag; Vault plus genau diese pending-Datei.\n"
     "- Jobs: Alias hseq-* = recurring td-* (td-eingang 18:00, td-handover 18:30, td-lernen Fr 19:00).\n"
     "- Handover-Antwort: 3 Zeilen Neu / Offen / Konflikt-Stale. "
     "Wiki-Ingest: ≥1 concepts|entities|syntheses-Seite. Privat-Vault: nie.\n"
@@ -257,6 +294,15 @@ def _vault_contracts_prompt(max_chars=5500):
     )
     if mem:
         chunks.append(mem)
+
+    try:
+        from . import vault_tools as _vt
+
+        pending = _vt.pending_contract_prompt_block(max_body=900)
+    except Exception:
+        pending = None
+    if pending:
+        chunks.append(pending)
 
     roots = list(getattr(config, "VAULT_PATHS", None) or [])
     ordered = []
@@ -351,24 +397,26 @@ def _self_id_facts():
         p = llm.get_provider()
         pname = getattr(p, "provider_name", "openrouter")
         primary = getattr(p, "model", None) or getattr(
-            config, "AGENT_OPENROUTER_MODEL", "deepseek/deepseek-v4-flash-0731"
+            config, "AGENT_OPENROUTER_MODEL", "deepseek-v4-pro"
         )
-        free = getattr(p, "fallback_model", None) or getattr(
-            config, "AGENT_OPENROUTER_FALLBACK_MODEL", "inclusionai/ling-3.0-flash:free"
+        fallback = getattr(p, "fallback_model", None) or getattr(
+            config, "AGENT_OPENROUTER_FALLBACK_MODEL", "deepseek/deepseek-v4-flash-0731"
         )
         active = getattr(p, "_active_model", None) or primary
         last = getattr(p, "last_used", None)
     except Exception:
-        pname = "openrouter"
-        primary = getattr(config, "AGENT_OPENROUTER_MODEL", "deepseek/deepseek-v4-flash-0731")
-        free = getattr(config, "AGENT_OPENROUTER_FALLBACK_MODEL", "inclusionai/ling-3.0-flash:free")
+        pname = "direct"
+        primary = getattr(config, "AGENT_OPENROUTER_MODEL", "deepseek-v4-pro")
+        fallback = getattr(
+            config, "AGENT_OPENROUTER_FALLBACK_MODEL", "deepseek/deepseek-v4-flash-0731"
+        )
         active = primary
         last = None
     return {
         "profile": "glyph-agent",
         "provider": pname,
         "primary_model": primary,
-        "fallback_model": free,
+        "fallback_model": fallback,
         "active_model": active,
         "last_used": last,
         "local_chat": False,
@@ -430,7 +478,8 @@ def run(
     on_event: Callback on_event(event: dict) -> None, wird pro Stufe live aufgerufen
              (Stufen-Streaming für die UI):
                {type: "step", action: <name>, status: "start|done|error", detail: str}
-               {type: "answer", status: "start"|"content", text: str}  (Antworttext-Stream)
+               {type: "draft", status: "content", text: str}   # Zwischen-LLM, nie Primär
+               {type: "answer", status: "content", text: str}  # nur Final / Status
     images: optionale OpenAI image_url-Parts (Vision) für den ersten Nutzerturn.
     conversation_history: optionale prior Turns [{role, content}, ...] (ohne/mit
              aktueller message — Duplikat wird verworfen). Für Multi-Turn-Nachfragen.
@@ -469,7 +518,7 @@ def run(
         )
 
     tool_prompt = tool_registry.tool_schema_prompt()
-    system = _ROLE + _vault_contracts_prompt() + "\n\n" + tool_prompt + (
+    system = _role() + _vault_contracts_prompt() + "\n\n" + tool_prompt + (
         "\n\nWICHTIG: Wenn du ein Werkzeug brauchst, antworte NUR mit JSON "
         "{\"tool\": Name, \"args\": {...}}. Kein Text drumherum. "
         "Wenn KEIN Werkzeug nötig ist, antworte normal auf Deutsch."
@@ -500,7 +549,8 @@ def run(
         "- Wenn das Tool-Ergebnis etwas NICHT enthält (z.B. Fristen, Pflichten, "
         "Zahlen), sage ehrlich, dass es dort nicht steht — ohne erfundene Fakten.\n"
         "- AUSNAHME Identität/Modell/Meta: freistil aus Runtime (Profil glyph-agent, "
-        "Cloud-Denker deepseek/deepseek-v4-flash-0731 über OpenRouter, Free nur bei Ausfall). "
+        f"Cloud-Denker {getattr(config, 'AGENT_OPENROUTER_MODEL', 'deepseek-v4-pro')} Direct, "
+        f"Fallback {getattr(config, 'AGENT_OPENROUTER_FALLBACK_MODEL', 'deepseek/deepseek-v4-flash-0731')} OpenRouter). "
         "Kein Vault, kein 'steht nicht im Tool-Ergebnis', kein starres Template.\n"
         "- Chat-Verlauf (wenn vorhanden): Produktnamen, Modelle und getroffene "
         "Vergleiche daraus für Nachfragen nutzen — nicht so tun, als wüsstest du "
@@ -671,13 +721,12 @@ def run(
         rounds += 1
         messages_for_llm = [{"role": "system", "content": system}] + history
         _emit({"type": "step", "action": "OpenRouter", "status": "start",
-               "detail": "Cloud-Denker denkt (deepseek-v4-flash-0731 → free)"})
+               "detail": llm.thinker_step_detail("agent")})
         reply = call_llm(messages_for_llm)
-        _emit({"type": "answer", "status": "content", "text": reply})
 
         parsed = tool_registry.try_parse_tool_call(reply)
         if parsed is None:
-            # Kein weiterer Tool-Call -> finale Antwort
+            # Kein Tool-Call: Direkt-Final ODER Zwischenprosa vor Single-Call-Final.
             try:
                 p = llm.get_provider()
                 steps.append({
@@ -688,17 +737,18 @@ def run(
             except Exception:
                 steps.append({"step": "LLM", "status": "success", "detail": "answer"})
             if tool_calls:
+                # Freie Zwischenantwort des Denkers → Protokoll (draft), nie Primär.
+                if (reply or "").strip():
+                    _emit({"type": "draft", "status": "content", "text": reply})
                 _emit({"type": "step", "action": "OpenRouter", "status": "done",
                        "detail": "formuliert finale Antwort (Single-Call mit Belegpflicht)"})
-                # SINGLE-CALL (0.3): Statt eines zweiten LLM-Calls (answer_system) die
-                # Striktheitsregeln in denselben Call integrieren. Der Kontext (history
-                # mit Vault+Web-Tool-Ergebnissen) wird anhängt; der System-Prompt trägt
-                # zusätzlich die answer_system-Belegpflicht. Ein OpenRouter-Round-Trip.
+                # SINGLE-CALL (0.3): Striktheitsregeln + Belegpflicht im Final-Call.
                 final = call_llm(
                     _final_messages(user_message, tool_results, prior_history=prior_history),
                     extra_system=answer_system,
                 )
-                _emit({"type": "answer", "status": "content", "text": final})
+                if (final or "").strip():
+                    _emit({"type": "answer", "status": "content", "text": final})
                 steps.append({"step": "answer", "status": "success", "detail": f"{len(final)} Zeichen"})
                 log.log(
                     "agent_final",
@@ -709,6 +759,17 @@ def run(
                 )
                 return {"answer": final, "rounds": rounds, "tool_calls": tool_calls, "ok": True,
                         "trace": _build_trace(tool_calls, tool_results, steps=steps)}
+            # Kein Tool gelaufen: reply ist die einzige und finale Antwort.
+            # DSML ohne parsebaren invoke nicht als Nutzertext leaken.
+            if tool_registry.looks_like_dsml(reply):
+                reply = tool_registry.prose_before_dsml(reply) or (
+                    "Denker hat einen Tool-Call im DSML-Format geschickt, "
+                    "der sich nicht lesen ließ. Bitte die Anfrage nochmal senden."
+                )
+            _emit({"type": "step", "action": "OpenRouter", "status": "done",
+                   "detail": "finale Antwort (direkt)"})
+            if (reply or "").strip():
+                _emit({"type": "answer", "status": "content", "text": reply})
             log.log(
                 "agent_reply",
                 rounds=rounds,
@@ -719,7 +780,9 @@ def run(
             return {"answer": reply, "rounds": rounds, "tool_calls": tool_calls, "ok": True,
                     "trace": _build_trace(tool_calls, tool_results, steps=steps)}
 
+        # Tool-Call: reines Tool-JSON nicht als draft (Lärm); Prosa drumherum schon.
         tool_name, args = parsed
+        _maybe_emit_tool_reply_draft(_emit, reply)
 
         # --- FetchUrl/ExtractUrl-Cancel (Review-Punkt 5): Wenn der Precheck bereits
         #     brauchbaren Web-Kontext geliefert hat (WebSearch-Treffer ODER erfolgreiches
@@ -744,7 +807,8 @@ def run(
                 _final_messages(user_message, tool_results, prior_history=prior_history),
                 extra_system=answer_system,
             )
-            _emit({"type": "answer", "status": "content", "text": final})
+            if (final or "").strip():
+                _emit({"type": "answer", "status": "content", "text": final})
             steps.append({"step": "answer", "status": "success", "detail": f"{len(final)} Zeichen"})
             log.log(
                 "agent_final",
@@ -800,12 +864,16 @@ def run(
                 ),
                 extra_system=answer_system,
             )
+            if (final or "").strip():
+                _emit({"type": "answer", "status": "content", "text": final})
             steps.append({"step": "answer", "status": "error", "detail": "nach Tool-Fehler"})
             return {"answer": final, "rounds": rounds, "tool_calls": tool_calls, "ok": False,
                     "trace": _build_trace(tool_calls, tool_results, steps=steps)}
 
     steps.append({"step": "answer", "status": "error", "detail": "Runden-Limit"})
-    return {"answer": "Zu viele Tool-Runden — gestoppt (Schleifenschutz).",
+    limit_msg = "Zu viele Tool-Runden — gestoppt (Schleifenschutz)."
+    _emit({"type": "answer", "status": "content", "text": limit_msg})
+    return {"answer": limit_msg,
             "rounds": rounds, "tool_calls": tool_calls, "ok": False,
             "trace": _build_trace(tool_calls, tool_results, steps=steps)}
 
@@ -1040,7 +1108,7 @@ def _fmt_tool_results(tool_results):
     # Datenschutz-Schranke: Kürzt Kontext vor Cloud-Übergabe (OpenRouter).
     # Jobs (core.jobs) dürfen per ContextVar eine höhere Grenze setzen.
     provider = getattr(llm.get_provider(), "provider_name", "openrouter")
-    if provider in ("openrouter", "fallback"):
+    if provider in ("openrouter", "fallback", "direct"):
         try:
             from . import jobs as _jobs
 
@@ -1131,7 +1199,7 @@ def _call_llm(messages, extra_system=None, images=None):
     images: optionale image_url-Parts — multimodal user content (Vision).
     """
     # System + Loop-Inhalt gebündelt für stabilen Chat-Call an OpenRouter
-    system = (_ROLE + _vault_contracts_prompt() + "\n\n" + tool_registry.tool_schema_prompt()
+    system = (_role() + _vault_contracts_prompt() + "\n\n" + tool_registry.tool_schema_prompt()
               + _RESEARCH_REQUIREMENT + "\n" + research.policy_prompt_snippet())
     if extra_system:
         system = system + "\n\n" + extra_system

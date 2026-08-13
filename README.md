@@ -45,7 +45,8 @@ Nutzerfrage (mode=code)
 | `CHAT_TIMEOUT` | `60` | Hartes Total-Timeout pro OpenRouter-Chat-Call (s) |
 | `CODE_CHAT_TIMEOUT` | `180` | OpenRouter-Wall-Clock im CODE-Modus (DeepSeek Multi-Round) |
 | `CODE_SHELL_ALLOW` | (Builtin-Whitelist) | Regex-Liste, Trenner `\|\|` |
-| `CODE_MAX_ROUNDS` | `16` | Tool-Loop-Runden |
+| `CODE_MAX_ROUNDS` | `32` | Tool-Loop-Runden |
+| `CODE_MESSAGE_CHARS` | `64000` | Cap für CODE `messages[]` (älteste Turns weg) |
 
 **Stabilität:** `server.py` nutzt `ThreadingHTTPServer` (hängender `/chat` blockiert nicht `/health`).
 Jeder Cloud-Call hat Wall-Clock-Timeout (Worker + `future.result`); ACP-Client bricht per
@@ -256,7 +257,7 @@ Jobs / Skills / Prompts: siehe HSEQ `AGENTS.md` und `Vorlagen/Jobs/`.
 | `hseq-handover` | `td-handover` | 18:30 Daily + **3-Zeilen-Briefing** |
 | `hseq-aus-fertig-lernen` | `td-lernen` | Fr 19:00 max. 1 Compounding-Edit |
 | `vault-ingest` | — | Quelle → Claims/Links (≥1 Synthese) |
-| `merken` | — | 1 Chat-Claim → Vault |
+| `merken` | — | 1 Claim → Schicht (Themen/MEMORY/CONTEXT; AGENTS erst nach Ja) |
 
 ```bash
 python3 scripts/run_job.py hseq-eingang --force          # = td-eingang

@@ -3,8 +3,8 @@
 OpenRouterProvider — Cloud-Modell über OpenRouter.
 
 Kette (B+):
-  1. Primär: deepseek/deepseek-v4-flash-0731 (AGENT_OPENROUTER_MODEL / OPENROUTER_MODEL)
-  2. Free:   inclusionai/ling-3.0-flash:free bei Ausfall des Primärs
+  1. Primär: config AGENT_OPENROUTER_MODEL (Default deepseek-v4-pro)
+  2. Fallback: AGENT_OPENROUTER_FALLBACK_MODEL (Default deepseek/deepseek-v4-flash-0731)
 
 Kein lokaler Chat-Fallback. Ohne API-Key: harter Fehler.
 
@@ -31,6 +31,24 @@ from .. import log as _agent_log
 from .. import config as _cfg
 
 log = logging.getLogger("glyph-agent.openrouter")
+
+
+def _message_text(data):
+    """Finaler Antworttext aus einer Chat-Completions-Antwort."""
+    msg = ((data or {}).get("choices") or [{}])[0].get("message") or {}
+    content = msg.get("content")
+    if isinstance(content, list):
+        parts = []
+        for p in content:
+            if isinstance(p, dict):
+                parts.append(str(p.get("text") or p.get("content") or ""))
+            elif p is not None:
+                parts.append(str(p))
+        content = "".join(parts)
+    text = str(content or "").strip()
+    if text:
+        return text
+    return str(msg.get("reasoning_content") or "").strip()
 
 
 def _resolve_chat_timeout(timeout=None):
@@ -116,27 +134,34 @@ class OpenRouterProvider(ModelProvider):
     def __init__(self, url=None, model=None, api_key=None, fallback_model=None):
         self.url = url or os.environ.get("OPENROUTER_URL", "https://openrouter.ai/api/v1")
         self.api_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
-        default_model = os.environ.get("OPENROUTER_MODEL", "deepseek/deepseek-v4-flash-0731")
         if getattr(_cfg, "MODE", "agent") == "agent":
-            default_model = os.environ.get(
-                "AGENT_OPENROUTER_MODEL", "deepseek/deepseek-v4-flash-0731"
-            )
-        self.model = model or default_model
-        # Free-Fallback hinter dem Primärmodell (Flash → free).
-        if fallback_model is not None:
-            self.fallback_model = fallback_model
-        elif getattr(_cfg, "MODE", "agent") == "agent":
-            self.fallback_model = getattr(
-                _cfg, "AGENT_OPENROUTER_FALLBACK_MODEL", None
-            ) or os.environ.get(
-                "AGENT_OPENROUTER_FALLBACK_MODEL", "inclusionai/ling-3.0-flash:free"
+            default_model = getattr(_cfg, "AGENT_OPENROUTER_MODEL", None) or os.environ.get(
+                "AGENT_OPENROUTER_MODEL", "deepseek-v4-pro"
             )
         else:
-            self.fallback_model = getattr(
-                _cfg, "OPENROUTER_FALLBACK_MODEL", None
-            ) or os.environ.get(
-                "OPENROUTER_FALLBACK_MODEL", "inclusionai/ling-3.0-flash:free"
+            default_model = getattr(_cfg, "OPENROUTER_MODEL", None) or os.environ.get(
+                "OPENROUTER_MODEL", "deepseek-v4-pro"
             )
+        self.model = model or default_model
+        # Fallback hinter dem Primärmodell (Direct/OR-Slug → OpenRouter Flash-0731).
+        if fallback_model is not None:
+            self.fallback_model = fallback_model or None
+        elif getattr(_cfg, "MODE", "agent") == "agent":
+            raw = getattr(_cfg, "AGENT_OPENROUTER_FALLBACK_MODEL", None)
+            if raw is None:
+                raw = os.environ.get(
+                    "AGENT_OPENROUTER_FALLBACK_MODEL",
+                    "deepseek/deepseek-v4-flash-0731",
+                )
+            self.fallback_model = raw or None
+        else:
+            raw = getattr(_cfg, "OPENROUTER_FALLBACK_MODEL", None)
+            if raw is None:
+                raw = os.environ.get(
+                    "OPENROUTER_FALLBACK_MODEL",
+                    "deepseek/deepseek-v4-flash-0731",
+                )
+            self.fallback_model = raw or None
         # openrouter | openrouter:free — für Trace / used_model
         self.last_used = None
         self._active_model = self.model
@@ -163,14 +188,20 @@ class OpenRouterProvider(ModelProvider):
                 "Cloud-Modell nicht verfügbar."
             )
 
-    def _chat_completion(self, messages, temperature, timeout=None, model=None):
+    def _chat_completion(
+        self, messages, temperature, timeout=None, model=None, url=None, api_key=None
+    ):
         """Chat-Completions mit hartem Total-Timeout.
 
         urlopen(timeout=…) ist nur Socket-Timeout; resp.read() kann trotzdem
         hängen. Deshalb: Request im Worker, future.result(timeout=wall) bricht
         den Caller hart ab (Thread kann nachlaufen bis Socket-Timeout greift).
+        url/api_key überschreiben den Provider-Default (Direct → OpenRouter-Hop).
         """
-        self._ensure_key()
+        use_key = (api_key if api_key is not None else self.api_key) or ""
+        use_url = (url if url is not None else self.url) or ""
+        if not use_key:
+            self._ensure_key()
         m = model or self.model
         wall = _resolve_chat_timeout(timeout)
         total_chars = sum(_content_chars(x.get("content")) for x in messages)
@@ -189,11 +220,11 @@ class OpenRouterProvider(ModelProvider):
             "stream": False,
         }
         req = urllib.request.Request(
-            f"{self.url}/chat/completions",
+            f"{str(use_url).rstrip('/')}/chat/completions",
             data=json.dumps(payload).encode("utf-8"),
             headers={
                 "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.api_key}",
+                "Authorization": f"Bearer {use_key}",
             },
             method="POST",
         )
@@ -251,7 +282,7 @@ class OpenRouterProvider(ModelProvider):
             raise e
 
         data = box["data"] or {}
-        return (data.get("choices") or [{}])[0].get("message", {}).get("content", "").strip()
+        return _message_text(data)
 
     def _with_free_fallback(self, messages, temperature, timeout=None):
         """Primär → Free. Setzt last_used / _active_model.
@@ -294,4 +325,10 @@ class OpenRouterProvider(ModelProvider):
             ],
             temperature,
             timeout=timeout,
+        )
+
+    def chat_messages(self, messages, temperature=0.3, timeout=None):
+        """Echte Multi-Turn-Messages (kein Flatten auf system+user)."""
+        return self._with_free_fallback(
+            list(messages or []), temperature, timeout=timeout
         )

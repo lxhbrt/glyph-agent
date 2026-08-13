@@ -38,33 +38,34 @@ LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs"
 
 # --- Modell-Runtime (B+, Stand 2026-08-05; CODE-Modus C′ 2026-08-07) ---
 # Betriebsart:
-#   "agent"          : VaultFind + optional Web, Antwort durch Cloud-Denker (OpenRouter).
+#   "agent"          : VaultFind + optional Web, Antwort durch Cloud-Denker.
 #   "openrouter-chat": reine Chat-Oberfläche OHNE Wiki/Tools.
-#   "code"           : ^_Code — Datei/Shell-Tools, KEIN VaultFind (DeepSeek via OpenRouter).
-# Chat-Denker = ausschließlich OpenRouter. Ollama nur Embeddings (bge-m3).
+#   "code"           : ^_Code — Datei/Shell-Tools, KEIN VaultFind.
+# Chat-Denker: Direct (OpenAI-kompatibel) → OpenRouter-Fallback. Ollama nur Embeddings.
 MODE = os.environ.get("MODE", "agent").lower()
 
 # --- Agentenmodus (MODE=agent) ---
-# B+-Default: openrouter = DeepSeek V4 Flash → free bei Ausfall. "fallback" = Alias derselben Kette.
-AGENT_PRIMARY_PROVIDER = os.environ.get("AGENT_PRIMARY_PROVIDER", "openrouter")
+# B+-Default: direct = api.deepseek.com Pro → OpenRouter Flash-0731.
+AGENT_PRIMARY_PROVIDER = os.environ.get("AGENT_PRIMARY_PROVIDER", "direct")
 AGENT_OPENROUTER_MODEL = os.environ.get(
-    "AGENT_OPENROUTER_MODEL", "deepseek/deepseek-v4-flash-0731"
+    "AGENT_OPENROUTER_MODEL", "deepseek-v4-pro"
 )
 AGENT_OPENROUTER_FALLBACK_MODEL = os.environ.get(
-    "AGENT_OPENROUTER_FALLBACK_MODEL", "inclusionai/ling-3.0-flash:free"
+    "AGENT_OPENROUTER_FALLBACK_MODEL", "deepseek/deepseek-v4-flash-0731"
 )
 
 # --- OpenRouter-Chat-Modus (MODE=openrouter-chat) ---
-OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "deepseek/deepseek-v4-flash-0731")
+OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "deepseek-v4-pro")
 OPENROUTER_FALLBACK_MODEL = os.environ.get(
-    "OPENROUTER_FALLBACK_MODEL", "inclusionai/ling-3.0-flash:free"
+    "OPENROUTER_FALLBACK_MODEL", "deepseek/deepseek-v4-flash-0731"
 )
 OPENROUTER_ALLOW_TOOLS = os.environ.get("OPENROUTER_ALLOW_TOOLS", "false").lower() == "true"
 OPENROUTER_ALLOW_VAULT = os.environ.get("OPENROUTER_ALLOW_VAULT", "false").lower() == "true"
 
 # Provider-Auswahl:
-#   "openrouter" : B+-Standard — DeepSeek V4 Flash → free
-#   "fallback"   : Alias — dieselbe 2-Stufen-Cloud-Kette (kein lokal)
+#   "direct"     : B+-Standard — Direct-API (DeepSeek/Grok/…) → OpenRouter
+#   "openrouter" : nur OpenRouter
+#   "fallback"   : Alias der alten 2-Stufen-OpenRouter-Kette
 if MODE == "openrouter-chat":
     PROVIDER = "openrouter"
 else:
@@ -76,17 +77,20 @@ OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 # OpenRouter. Key aus Umgebung/.env — nicht im Code.
 OPENROUTER_URL = os.environ.get("OPENROUTER_URL", "https://openrouter.ai/api/v1")
 
+# Direct: OpenAI-kompatibler Primär-Hop. Key: DIRECT_API_KEY oder DEEPSEEK_API_KEY.
+DIRECT_API_URL = os.environ.get("DIRECT_API_URL", "https://api.deepseek.com").rstrip("/")
+
 # Datenschutz-Schranke für Cloud-Anfragen: max. Zeichen, die an ein externes
 # Modell gehen (Tool-Loop kürzt Kontext vor der Übergabe). 0 = unbegrenzt (nicht empfohlen).
 EXTERNAL_MAX_CHARS = int(os.environ.get("EXTERNAL_MAX_CHARS", "4000"))
 
 # --- CODE-Modus (^_Code / C′) ---
-# Denker: DeepSeek V4 Flash 0731 über OpenRouter (kein Anthropic/Claude-Code).
+# Denker: Direct Flash → OpenRouter Flash-0731 (kein Anthropic/Claude-Code).
 CODE_OPENROUTER_MODEL = os.environ.get(
-    "CODE_OPENROUTER_MODEL", "deepseek/deepseek-v4-flash-0731"
+    "CODE_OPENROUTER_MODEL", "deepseek-v4-flash"
 )
 CODE_OPENROUTER_FALLBACK_MODEL = os.environ.get(
-    "CODE_OPENROUTER_FALLBACK_MODEL", "deepseek/deepseek-v4-flash"
+    "CODE_OPENROUTER_FALLBACK_MODEL", "deepseek/deepseek-v4-flash-0731"
 )
 # Screenshots/Bilder: DeepSeek Flash hat oft keine Vision — Luna separat (oder Override).
 CODE_VISION_MODEL = os.environ.get("CODE_VISION_MODEL", "openai/gpt-5.6-luna")
@@ -189,7 +193,9 @@ CODE_SHELL_ALLOW = (
     if _code_shell_env
     else list(_CODE_SHELL_DEFAULT)
 )
-CODE_MAX_ROUNDS = int(os.environ.get("CODE_MAX_ROUNDS", "16"))
+CODE_MAX_ROUNDS = int(os.environ.get("CODE_MAX_ROUNDS", "32"))
+# Gesamt-Zeichen für CODE-messages[] (system + Turns). 0 = kein Cap.
+CODE_MESSAGE_CHARS = int(os.environ.get("CODE_MESSAGE_CHARS", "64000"))
 
 # Geschützte Ordner(namen) im Vault — werden von SUCHEN/LESEN/EDITIEREN ausgeschlossen.
 BLOCKED_DIRS = [

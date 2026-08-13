@@ -48,11 +48,11 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# .env früh laden (glyph-agent/.env), damit AGENT_PRIMARY_PROVIDER/OPENROUTER_MODEL/Keys
-# unabhängig vom Startweg greifen (kein stiller Rückfall auf ollama).
+# .env früh laden (glyph-agent/.env), dann Bindings-Keys falls Env leer.
 try:
-    from core.dotenv import load_dotenv
+    from core.dotenv import load_dotenv, load_ui_bindings
     load_dotenv()
+    load_ui_bindings()
 except Exception:
     pass
 
@@ -281,10 +281,12 @@ def _handle_chat(payload, send=None):
         from core import llm as _llm
         system = (
             "Du bist glyph-agent (reiner Chat-Modus). Cloud-Denker: "
-            "deepseek/deepseek-v4-flash-0731 über OpenRouter (Free-Fallback bei Ausfall). "
+            "deepseek-v4-pro (Direct), Fallback OpenRouter "
+            "deepseek/deepseek-v4-flash-0731. Kein Tiny/Free. "
             "Du hast KEINEN Zugriff auf Dateien, einen Vault, Tools oder das Internet. "
             "Antworte nur aus deinem eigenen Wissen. "
-            "Bei Modell-Fragen: nenne deepseek/deepseek-v4-flash-0731, kein Wiki/Tool nötig."
+            "Bei Modell-Fragen: nenne das aktive Runtime-Modell "
+            "(Primär deepseek-v4-pro, sonst OpenRouter Flash-0731), kein Wiki/Tool nötig."
         )
         try:
             from core import history as chat_history
@@ -419,7 +421,17 @@ def _read_json_body(handler):
 def _handle_models_post(payload):
     from core import runtime_models
 
-    snap = runtime_models.apply_models(payload or {})
+    body = payload or {}
+    if isinstance(body.get("direct"), dict):
+        runtime_models.apply_direct(body.get("direct"))
+    if (
+        isinstance(body.get("shared"), dict)
+        or body.get("primary")
+        or body.get("model")
+    ):
+        snap = runtime_models.apply_models(body)
+    else:
+        snap = runtime_models.current_models_snapshot()
     return {"ok": True, "models": snap, **_handle_health()}
 
 
@@ -825,21 +837,33 @@ def main():
                 self._send(404, {"error": "Not found"})
 
     config.ensure_dirs()
-    # Start-Validierung: OpenRouter-Key Pflicht — ohne Key kein Start (kein lokaler Chat).
+    # Start-Validierung: Direct- oder OpenRouter-Key — ohne beides kein Start.
     try:
         provider = llm.get_provider()
     except Exception as e:
         print(f"❌ Provider-Initialisierung fehlgeschlagen: {e}", file=sys.stderr)
         sys.exit(1)
-    if getattr(provider, "provider_name", "") in ("openrouter", "fallback"):
-        key = os.environ.get("OPENROUTER_API_KEY", "").strip()
-        if not key:
-            print(
-                "❌ AGENT_PRIMARY_PROVIDER=openrouter erfordert OPENROUTER_API_KEY.\n"
-                "   Start abgebrochen — Chat nur über OpenRouter (Luna → free).",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+    pname = getattr(provider, "provider_name", "")
+    has_direct = bool(
+        os.environ.get("DIRECT_API_KEY", "").strip()
+        or os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    )
+    has_or = bool(os.environ.get("OPENROUTER_API_KEY", "").strip())
+    if pname == "direct" and not has_direct and not has_or:
+        print(
+            "❌ AGENT_PRIMARY_PROVIDER=direct braucht DIRECT_API_KEY "
+            "(oder DEEPSEEK_API_KEY) — OpenRouter-Key nur als Fallback.\n"
+            "   Start abgebrochen.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if pname in ("openrouter", "fallback") and not has_or:
+        print(
+            "❌ AGENT_PRIMARY_PROVIDER=openrouter erfordert OPENROUTER_API_KEY.\n"
+            "   Start abgebrochen.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     # Daemon-Threads: Server-Stop wartet nicht auf hängende Chat-Worker.
     server.daemon_threads = True

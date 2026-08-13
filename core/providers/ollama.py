@@ -28,12 +28,12 @@ class OllamaProvider(ModelProvider):
 
     def generate(self, prompt, temperature=0.3, num_ctx=8192):
         raise RuntimeError(
-            "Lokaler Chat-Provider entfernt. Chat läuft nur über OpenRouter "
-            "(deepseek/deepseek-v4-flash-0731 → free)."
+            "Lokaler Chat-Provider entfernt. Chat: Direct deepseek-v4-pro "
+            "→ OpenRouter deepseek/deepseek-v4-flash-0731."
         )
 
     def chat(self, system, user, temperature=0.3, num_ctx=8192):
         raise RuntimeError(
-            "Lokaler Chat-Provider entfernt. Chat läuft nur über OpenRouter "
-            "(deepseek/deepseek-v4-flash-0731 → free)."
+            "Lokaler Chat-Provider entfernt. Chat: Direct deepseek-v4-pro "
+            "→ OpenRouter deepseek/deepseek-v4-flash-0731."
         )

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Provider-Selbsttest — OpenRouter Luna → free, kein lokaler Chat.
+Provider-Selbsttest — Direct Pro → OpenRouter Flash, kein lokaler Chat.
 
 Aufruf:
     python3 tests/test_providers.py
@@ -108,8 +108,8 @@ def main():
     p = load("openrouter")
     check("provider_name == 'openrouter'", p.provider_name == "openrouter", f"-> {p.provider_name}")
     check(
-        "Primär-Modell DeepSeek Flash",
-        "deepseek-v4-flash" in (p.model or ""),
+        "Primär-Modell DeepSeek Pro",
+        "deepseek-v4-pro" in (p.model or ""),
         f"-> {getattr(p, 'model', p.model_name)}",
     )
     try:
@@ -141,15 +141,49 @@ def main():
         )
         check("last_used nie 'local'", getattr(p, "last_used", None) != "local")
 
-    print("\n[3] veralteter Name 'ollama' wird auf openrouter umgebogen:")
+    print("\n[3] veralteter Name 'ollama' wird auf direct umgebogen:")
     os.environ["OPENROUTER_API_KEY"] = "test"
+    os.environ["DIRECT_API_KEY"] = "test-direct"
     p = load("ollama", {"MODE": "agent", "AGENT_PRIMARY_PROVIDER": "ollama"})
-    # factory maps ollama → openrouter
     check(
-        "ollama-Alias lädt openrouter",
-        p.provider_name == "openrouter",
+        "ollama-Alias lädt direct",
+        p.provider_name == "direct",
         f"-> {p.provider_name}",
     )
+
+    print("\n[3b] direct — ohne Key MUSS sauber fehlschlagen:")
+    os.environ.pop("DIRECT_API_KEY", None)
+    os.environ.pop("DEEPSEEK_API_KEY", None)
+    p = load("direct", {
+        "MODE": "agent",
+        "AGENT_PRIMARY_PROVIDER": "direct",
+        "AGENT_OPENROUTER_MODEL": "deepseek-v4-pro",
+        "AGENT_OPENROUTER_FALLBACK_MODEL": "",
+        "OPENROUTER_API_KEY": "",
+    })
+    check("provider_name == 'direct'", p.provider_name == "direct", f"-> {p.provider_name}")
+    try:
+        p.chat("s", "u")
+        check("Direct ohne Key blockiert", False, "<- hat NICHT geblockt!")
+    except RuntimeError as e:
+        check("Direct ohne Key blockiert", True, f"-> {str(e)[:50]}")
+
+    from core.providers.direct import uses_openrouter_slug
+    check("deepseek-v4-pro ist Direct-ID", uses_openrouter_slug("deepseek-v4-pro") is False)
+    check("OR-Slug erkannt", uses_openrouter_slug("deepseek/deepseek-v4-flash-0731") is True)
+
+    print("\n[3c] factory-Default ohne Env: Direct Pro → OpenRouter Flash-0731:")
+    os.environ.pop("AGENT_OPENROUTER_MODEL", None)
+    os.environ.pop("AGENT_OPENROUTER_FALLBACK_MODEL", None)
+    os.environ["DIRECT_API_KEY"] = "test-direct"
+    p = load("direct", {"MODE": "agent", "AGENT_PRIMARY_PROVIDER": "direct"})
+    check("Default-Primär deepseek-v4-pro", p.model == "deepseek-v4-pro", f"-> {p.model}")
+    check(
+        "Default-Fallback Flash-0731",
+        p.fallback_model == "deepseek/deepseek-v4-flash-0731",
+        f"-> {p.fallback_model}",
+    )
+    check("kein :free im Default-Fallback", ":free" not in str(p.fallback_model or ""))
 
     print("\n[4] Kürzungsschranke (EXTERNAL_MAX_CHARS) im Tool-Loop:")
     from core import tool_loop

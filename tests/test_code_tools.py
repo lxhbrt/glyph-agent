@@ -217,7 +217,7 @@ class CodeToolsTests(unittest.TestCase):
         self.assertGreaterEqual(res["result"]["count"], 1)
 
     def test_config_max_rounds_default(self):
-        self.assertGreaterEqual(int(config.CODE_MAX_ROUNDS), 16)
+        self.assertGreaterEqual(int(config.CODE_MAX_ROUNDS), 32)
 
     def test_workspace_roots_only_existing(self):
         roots = code_tools.workspace_roots()

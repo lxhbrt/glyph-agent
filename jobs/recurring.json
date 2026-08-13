@@ -13,10 +13,10 @@
       "paused": false,
       "allow_write": true,
       "created_at": "2026-08-08T23:03:05+02:00",
-      "last_run_at": "2026-08-11T21:39:31+02:00",
+      "last_run_at": "2026-08-13T18:13:56+02:00",
       "last_status": "ok",
-      "last_answer_preview": "Ich führe die Tagesprüfung aus. Zuerst lese ich die vollständige Vorlage, um den Abschnitt „Automatische Tagesprüfung“ zu erhalten.\n\n{\"tool\": \"ReadNote\", \"args\": {\"path\": \"Vorlagen/Audit/Prompt - Auditnotizen auswerten und Auditbericht.md\"}}",
-      "last_stamp": "2026-08-11"
+      "last_answer_preview": "{\"tool\": \"ReadNote\", \"args\": {\"path\": \"HSEQ Sync/Vorlagen/Audit/Prompt - Auditnotizen auswerten und Auditbericht.md\"}}",
+      "last_stamp": "2026-08-13"
     },
     {
       "id": "td-handover",
@@ -29,10 +29,10 @@
       "paused": false,
       "allow_write": true,
       "created_at": "2026-08-08T23:03:05+02:00",
-      "last_run_at": "2026-08-11T21:40:13+02:00",
+      "last_run_at": "2026-08-13T18:45:24+02:00",
       "last_status": "ok",
-      "last_answer_preview": "Neu: —\nOffen: —\nKonflikt/Stale: —\n\nHandover: ruhig (2026-08-11)\n\nDaily geschrieben: `HSEQ Sync/00 Arbeitsfluss/Daily/2026-08-11.md`. Alle 4 Eingangs-Rohnotizen (Rosier Sylt-Tinnum, Hartmann Grevenbroich, Umweltzertifizierung Hartmann, Umweltschutz Senger) haben Log-Treffer im Verarbeitungslog (letzter Lauf 2026-07-20 18:09) — bleiben als Beleg im Eingang, kein To-do-Stapel. Keine neuen Berichte in",
-      "last_stamp": "2026-08-11"
+      "last_answer_preview": "Neu: —\nOffen: —\nKonflikt/Stale: —\n\nHandover: ruhig (2026-08-13)",
+      "last_stamp": "2026-08-13"
     },
     {
       "id": "td-lernen",
@@ -62,10 +62,10 @@
       "paused": false,
       "allow_write": false,
       "created_at": "2026-08-09T11:33:15+02:00",
-      "last_run_at": "2026-08-11T03:02:46+02:00",
+      "last_run_at": "2026-08-13T03:00:45+02:00",
       "last_status": "ok",
-      "last_answer_preview": "Memory-Hygiene 2026-08-11\nDaily: neu (2026-08-11.md)\nMEMORY PII: 0 → clean",
-      "last_stamp": "2026-08-11",
+      "last_answer_preview": "Memory-Hygiene 2026-08-13\nDaily: neu (2026-08-13.md)\nMEMORY PII: 0 → clean",
+      "last_stamp": "2026-08-13",
       "script": "memory_hygiene.py"
     },
     {
@@ -79,10 +79,10 @@
       "paused": false,
       "allow_write": false,
       "created_at": "2026-08-09T11:33:15+02:00",
-      "last_run_at": "2026-08-11T06:02:58+02:00",
+      "last_run_at": "2026-08-13T06:00:58+02:00",
       "last_status": "ok",
-      "last_answer_preview": "Session-Cleanup 2026-08-11: exit=0\n{\"agentId\": \"main\", \"storePath\": \"/Users/lxndrhbrt/.openclaw/agents/main/sessions/sessions.json\", \"mode\": \"enforce\", \"dryRun\": false, \"beforeCount\": 18, \"afterCount\": 18, \"repaired\": 0, \"missing\": 0, \"dmScopeRetired\": 0, \"modelRunPruned\": 0, \"pruned\": 0, \"capped\": 0, \"unreferencedArtifacts\": {\"scannedFiles\": 259, \"removedFiles\": 0, \"freedBytes\": 0, \"olderThanMs\":",
-      "last_stamp": "2026-08-11",
+      "last_answer_preview": "Session-Cleanup 2026-08-13: exit=0\n{\"agentId\": \"main\", \"storePath\": \"/Users/lxndrhbrt/.openclaw/agents/main/sessions/sessions.json\", \"mode\": \"enforce\", \"dryRun\": false, \"beforeCount\": 18, \"afterCount\": 18, \"repaired\": 0, \"missing\": 0, \"dmScopeRetired\": 0, \"modelRunPruned\": 0, \"pruned\": 0, \"capped\": 0, \"unreferencedArtifacts\": {\"scannedFiles\": 259, \"removedFiles\": 1, \"freedBytes\": 7033, \"olderThanM",
+      "last_stamp": "2026-08-13",
       "script": "session_cleanup_legacy.py"
     }
   ],

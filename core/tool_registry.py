@@ -12,7 +12,19 @@ Sicherheitsprinzipien:
   - Schreibende Tools sind MARKIERT (write=True) und brauchen im Chat-Flow
     eine Bestätigung, bevor sie ausgeführt werden.
 """
+import json
+import re
+
 from . import vault_tools, web, retrieval
+
+# DeepSeek V4 DSML — kanonisch U+FF5C, oft als ASCII || oder | durchgereicht.
+_DSML_INNER = "\uff5cDSML\uff5c"
+_DSML_PIPE = r"(?:\|{1,2}|\uff5c)"
+_DSML_MARK = rf"{_DSML_PIPE}(?:\s*{_DSML_PIPE})?\s*DSML\s*{_DSML_PIPE}(?:\s*{_DSML_PIPE})?"
+_DSML_TAG_RE = re.compile(
+    rf"<\s*(/?)\s*{_DSML_MARK}\s*([A-Za-z_][\w]*)([^>]*)>",
+    re.IGNORECASE,
+)
 
 # --- Tool-Schema (wird auch dem Modell im System-Prompt beschrieben) ---
 
@@ -312,16 +324,114 @@ def tool_schema_prompt(mode="agent"):
 
 # --- Erkennung & Ausführung ---
 
+def looks_like_dsml(text):
+    """True, wenn die Antwort DeepSeek-DSML-Tool-Markup enthält."""
+    if not text:
+        return False
+    return _DSML_TAG_RE.search(text) is not None
+
+
+def prose_before_dsml(text):
+    """Sichtbare Prosa vor dem ersten DSML-Tag — Markup selbst nie zurück."""
+    if not text:
+        return ""
+    m = _DSML_TAG_RE.search(text)
+    if not m:
+        return (text or "").strip()
+    return text[: m.start()].strip()
+
+
+def _normalize_dsml(text):
+    """Alle Token-Varianten auf kanonisch <｜DSML｜tag …>."""
+
+    def repl(m):
+        slash = m.group(1) or ""
+        name = m.group(2)
+        rest = m.group(3) or ""
+        return f"<{slash}{_DSML_INNER}{name}{rest}>"
+
+    return _DSML_TAG_RE.sub(repl, text)
+
+
+def _coerce_dsml_value(raw, string_flag):
+    raw = (raw or "").strip()
+    flag = (string_flag or "").lower()
+    if flag == "true":
+        return raw
+    if flag == "false":
+        low = raw.lower()
+        if low == "true":
+            return True
+        if low == "false":
+            return False
+        if re.fullmatch(r"-?\d+", raw):
+            return int(raw)
+        if re.fullmatch(r"-?\d+\.\d+", raw):
+            return float(raw)
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return raw
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return raw
+
+
+def _parse_dsml_tool_call(text):
+    """Erster DSML-invoke → (name, args) oder None.
+
+    Close-Tags: XML `</｜DSML｜parameter>` *oder* DeepSeek-nativ
+    `<｜DSML｜parameter>` ohne Attribute (Screenshot-Leak).
+    """
+    if not looks_like_dsml(text):
+        return None
+    s = _normalize_dsml(text)
+    token = re.escape(_DSML_INNER)
+    inv = re.search(
+        rf"<{token}invoke\s+name=\"([^\"]+)\"\s*>(.*?)"
+        rf"(?:</{token}invoke>|<{token}invoke>|"
+        rf"</{token}(?:tool_calls|function_calls)>|$)",
+        s,
+        re.DOTALL | re.IGNORECASE,
+    )
+    if not inv:
+        return None
+    name = (inv.group(1) or "").strip()
+    if not name:
+        return None
+    body = inv.group(2) or ""
+    args = {}
+    for pm in re.finditer(
+        rf"<{token}parameter\s+name=\"([^\"]+)\"(?:\s+string=\"(true|false)\")?\s*>"
+        rf"(.*?)"
+        rf"(?:</{token}parameter>|<{token}parameter>"
+        rf"|(?=<{token}parameter\s)|(?=</?{token}invoke))",
+        body,
+        re.DOTALL | re.IGNORECASE,
+    ):
+        key = (pm.group(1) or "").strip()
+        if not key:
+            continue
+        args[key] = _coerce_dsml_value(pm.group(3), pm.group(2))
+    return (name, args)
+
+
 def try_parse_tool_call(text):
     """
     Versucht, aus der Modell-Antwort einen Tool-Call zu extrahieren.
     Liefert (tool_name, args) oder None, wenn es keine Tool-Anfrage ist.
+    Reihenfolge: DeepSeek-DSML (V4 leaked das als Text), dann JSON.
     Robust für EINEN oder MEHRERE verschachtelte JSON-Blöcke (gpt-5.6-luna sendet
     teils mehrere WebSearch-Blöcke). Gibt den ERSTEN gültigen Tool-Call zurück.
     Nutzt raw_decode, um verschachtelte Objekte korrekt zu parsen.
     """
-    import json
-    import re
+    if not text or not str(text).strip():
+        return None
+
+    dsml = _parse_dsml_tool_call(text)
+    if dsml is not None:
+        return dsml
 
     s = text.strip()
     # Markdown-Codeblock entfernen, falls die ganze Antwort einer ist

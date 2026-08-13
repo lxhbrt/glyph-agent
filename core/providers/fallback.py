@@ -76,6 +76,14 @@ class FallbackProvider(OpenRouterProvider):
                 timeout=timeout,
                 model=model,
             )
+        if kind == "chat_messages":
+            temperature = kwargs.get("temperature", 0.3)
+            return self._chat_completion(
+                list(args[0] or []),
+                temperature,
+                timeout=timeout,
+                model=model,
+            )
         prompt = args[0]
         temperature = kwargs.get("temperature", 0.3)
         return self._chat_completion(
@@ -84,6 +92,14 @@ class FallbackProvider(OpenRouterProvider):
             timeout=timeout,
             model=model,
         )
+
+    def chat_messages(self, messages, temperature=0.3, timeout=None):
+        text, _used = self._call(
+            "chat_messages",
+            (list(messages or []),),
+            {"temperature": temperature, "timeout": timeout},
+        )
+        return text
 
     def chat(self, system, user, temperature=0.3, num_ctx=8192, timeout=None):
         text, used = self._call(

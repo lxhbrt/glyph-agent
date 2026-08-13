@@ -83,6 +83,15 @@ def current_models_snapshot() -> Dict[str, Any]:
         },
         "code_model": code_primary,
         "code_fallback_model": code_fb,
+        "direct": {
+            "url": getattr(config, "DIRECT_API_URL", None)
+            or os.environ.get("DIRECT_API_URL")
+            or "https://api.deepseek.com",
+            "key_set": bool(
+                os.environ.get("DIRECT_API_KEY", "").strip()
+                or os.environ.get("DEEPSEEK_API_KEY", "").strip()
+            ),
+        },
     }
 
 
@@ -117,7 +126,7 @@ def apply_models(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
     primary = _norm_id(shared.get("primary") or body.get("model"))
     if not primary:
-        raise ValueError("shared.primary ist Pflicht (OpenRouter Model-ID)")
+        raise ValueError("shared.primary ist Pflicht (Model-ID)")
 
     # fallback key: if present (even empty) honor it; if absent keep previous? Spec: UI always sends.
     # Prefer explicit: if "fallback" in shared use it; elif top-level; else no fallback when applying full shared.
@@ -172,6 +181,51 @@ def apply_models(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return current_models_snapshot()
 
 
+def apply_direct(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Hot-apply Direct-URL/Key (OpenAI-kompatibler Primär-Hop)."""
+    body = payload if isinstance(payload, dict) else {}
+    url = _norm_id(body.get("url") or body.get("DIRECT_API_URL"))
+    if url:
+        config.DIRECT_API_URL = url.rstrip("/")
+        _set_env("DIRECT_API_URL", config.DIRECT_API_URL)
+
+    key_present = any(k in body for k in ("api_key", "DIRECT_API_KEY", "key"))
+    if key_present:
+        raw = body.get("api_key")
+        if raw is None:
+            raw = body.get("DIRECT_API_KEY")
+        if raw is None:
+            raw = body.get("key")
+        key = _norm_id(raw)
+        _set_env("DIRECT_API_KEY", key or None)
+        if not key:
+            os.environ.pop("DIRECT_API_KEY", None)
+
+    try:
+        p = llm.get_provider()
+    except Exception:
+        factory.reset_provider()
+        p = llm.get_provider()
+
+    if p is not None and getattr(p, "provider_name", "") == "direct":
+        if url:
+            p.url = getattr(config, "DIRECT_API_URL", url)
+        if key_present:
+            from .providers.direct import resolve_direct_key
+
+            p.api_key = resolve_direct_key()
+
+    snap = current_models_snapshot()
+    snap["direct"] = {
+        "url": getattr(config, "DIRECT_API_URL", None),
+        "key_set": bool(
+            os.environ.get("DIRECT_API_KEY", "").strip()
+            or os.environ.get("DEEPSEEK_API_KEY", "").strip()
+        ),
+    }
+    return snap
+
+
 def probe_model(model_id: str, timeout: int = 45) -> Dict[str, Any]:
     """
     Minimal OpenRouter chat with the given model id (production key/URL path).
@@ -182,8 +236,8 @@ def probe_model(model_id: str, timeout: int = 45) -> Dict[str, Any]:
         raise ValueError("model ist Pflicht")
 
     p = llm.get_provider()
-    if getattr(p, "provider_name", "") not in ("openrouter", "fallback"):
-        raise RuntimeError(f"Probe nur für OpenRouter, aktiv: {getattr(p, 'provider_name', '?')}")
+    if getattr(p, "provider_name", "") not in ("openrouter", "fallback", "direct"):
+        raise RuntimeError(f"Probe nur für Direct/OpenRouter, aktiv: {getattr(p, 'provider_name', '?')}")
 
     old_model = getattr(p, "model", None)
     old_fb = getattr(p, "fallback_model", None)

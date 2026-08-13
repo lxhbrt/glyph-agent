@@ -64,7 +64,15 @@ def test_code_override():
     assert config.CODE_OPENROUTER_MODEL == "b/code"
 
 
+def test_apply_direct_url():
+    factory.reset_provider()
+    snap = runtime_models.apply_direct({"url": "https://api.deepseek.com/"})
+    assert config.DIRECT_API_URL == "https://api.deepseek.com"
+    assert snap["direct"]["url"] == "https://api.deepseek.com"
+
+
 if __name__ == "__main__":
     test_apply_shared_and_clear_fallback()
     test_code_override()
+    test_apply_direct_url()
     print("ok")

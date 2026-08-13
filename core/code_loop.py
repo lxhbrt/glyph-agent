@@ -2,7 +2,7 @@
 """
 CODE-Modus-Loop (^_Code / C′).
 
-DeepSeek V4 Flash über OpenRouter + Code-Tools (Read/Write/List/Run).
+DeepSeek V4 Flash (Direct) → OpenRouter Flash-0731 + Code-Tools (Read/Write/List/Run).
 Kein VaultFind, kein Web-Precheck.
 Write/Whitelist-Shell unter Workspace r+w ohne Popup; Elevated Shell
 braucht Glyph-Genehmigung (pending_confirmation + resume_token).
@@ -10,6 +10,7 @@ braucht Glyph-Genehmigung (pending_confirmation + resume_token).
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import threading
 import time
@@ -17,7 +18,7 @@ import time
 from . import config, llm, log, tool_registry
 from . import code_tools
 
-MAX_ROUNDS = getattr(config, "CODE_MAX_ROUNDS", 16) or 16
+MAX_ROUNDS = getattr(config, "CODE_MAX_ROUNDS", 32) or 32
 
 # Resume-State für Genehmigungen (In-Memory, Prozess-lokal)
 _PENDING_LOCK = threading.Lock()
@@ -27,8 +28,10 @@ _PENDING_TTL_S = 15 * 60
 
 _CODE_ROLE = (
     "Du bist ^_Code: ein Code-Agent in Glyph. Denker: DeepSeek V4 Flash "
-    f"({getattr(config, 'CODE_OPENROUTER_MODEL', 'deepseek/deepseek-v4-flash-0731')}) "
-    "über OpenRouter.\n"
+    f"({getattr(config, 'CODE_OPENROUTER_MODEL', 'deepseek-v4-flash')}) "
+    "Direct, Fallback OpenRouter "
+    f"{getattr(config, 'CODE_OPENROUTER_FALLBACK_MODEL', 'deepseek/deepseek-v4-flash-0731')}. "
+    "Kein Tiny/Free.\n"
     "Du arbeitest NUR in Workspace-Roots aus `~/.glyph/workspaces.json` "
     "(Modes: r = lesen, r+w = lesen+schreiben+Shell, 🔒 private = tot).\n"
     "Werkzeuge: ListDir, ReadFile (offset/limit), Grep, SearchReplace (exakt 1 Treffer), "
@@ -52,6 +55,12 @@ _CODE_ROLE = (
     "- Bei Modell-Fragen: nenne DeepSeek V4 Flash und OpenRouter, Profil ^_Code.\n"
     "- SHARED SoT: `~/.glyph/AGENTS.md` gilt auch für dich (Jobs/Vaults/Skills/Red Line) — "
     "nicht im Chat neu verhandeln, was dort und in Repo-CONTEXT geklärt ist.\n"
+    "- KORREKTUR: Chat vs. AGENTS/CONTEXT → Konflikt nennen, Vertrag gewinnt. "
+    "Vorschlag nach ~/.glyph/memory/pending-contract.md, nicht nur in den Chat. "
+    "AGENTS/MEMORY nur nach Auftrag. Repo-Verhalten → CONTEXT.md.\n"
+    "- ORIENT: Orient+System map der r+w-Workspaces liegen im System-Prompt. "
+    "Kein Blind-Walk (ListDir/Grep über den ganzen Tree). Gezielt die genannten Quellen. "
+    "Map veraltet → nach Struktur-Change dort nachziehen, nicht parallele Doku erfinden.\n"
 )
 
 
@@ -60,6 +69,14 @@ def _shared_contract_snippet(max_chars=3200):
     import os as _os
 
     parts = []
+    try:
+        from . import vault_tools as _vt
+
+        pending = _vt.pending_contract_prompt_block(max_body=800)
+    except Exception:
+        pending = None
+    if pending:
+        parts.append(pending)
     for path, label, cap in (
         (_os.path.expanduser("~/.glyph/AGENTS.md"), "SHARED SoT · AGENTS.md", 2000),
         (_os.path.expanduser("~/.glyph/MEMORY.md"), "MEMORY (Lektionen)", 1600),
@@ -109,14 +126,247 @@ def _pop_pending(token):
         return _PENDING.pop(token, None)
 
 
+def _content_len(content):
+    if content is None:
+        return 0
+    if isinstance(content, list):
+        n = 0
+        for p in content:
+            if isinstance(p, dict):
+                n += len(str(p.get("text") or ""))
+        return n
+    return len(str(content))
+
+
+def _messages_chars(messages):
+    return sum(_content_len(m.get("content")) for m in messages or [])
+
+
+def extract_orient_map(md, max_chars=2800):
+    """## Orient + ## System map bis zur nächsten anderen ##-Überschrift."""
+    if not md:
+        return ""
+    lines = str(md).splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if line.startswith("## ") and "orient" in line.lower():
+            start = i
+            break
+    if start is None:
+        return ""
+    out = []
+    seen_map = False
+    for i in range(start, len(lines)):
+        line = lines[i]
+        if i > start and line.startswith("## "):
+            title = line[3:].strip().lower()
+            if title.startswith("system map") or title.startswith("system-map"):
+                seen_map = True
+            elif seen_map or not title.startswith("orient"):
+                break
+        out.append(line)
+    text = "\n".join(out).strip()
+    if max_chars > 0 and len(text) > max_chars:
+        text = text[: max_chars - 20] + "\n…[gekürzt]"
+    return text
+
+
+def workspace_orient_block():
+    """r+w: Orient+Map. r: eine Zeile. 🔒 aus."""
+    try:
+        from . import workspaces_registry as wr
+        items = wr.list_workspaces(include_missing=False)
+    except Exception:
+        return ""
+    parts = []
+    for w in items:
+        if not w.get("enabled"):
+            continue
+        mode = w.get("mode") or "r"
+        if mode == "private":
+            continue
+        name = w.get("name") or w.get("id") or "?"
+        path = w.get("path") or ""
+        if mode != "rw":
+            parts.append(f"- {name} ({path}) — mode r, CONTEXT nicht injiziert.")
+            continue
+        ctx = os.path.join(path, "CONTEXT.md") if path else ""
+        body = ""
+        if ctx and os.path.isfile(ctx):
+            try:
+                with open(ctx, encoding="utf-8", errors="replace") as f:
+                    body = extract_orient_map(f.read())
+            except OSError:
+                body = ""
+        if body:
+            parts.append(f"### {name} ({path}) r+w\n{body}")
+        else:
+            parts.append(f"- {name} ({path}) — r+w, kein CONTEXT.md Orient/Map.")
+    if not parts:
+        return ""
+    return (
+        "\n\nWORKSPACE-ORIENT (injiziert — nicht den Tree walken):\n"
+        + "\n\n".join(parts)
+    )
+
+
+def trim_code_history(history, budget):
+    """Älteste Turns weg. Erstes User + letztes Tool-Ergebnis bleiben."""
+    history = list(history or [])
+    if not history or budget <= 0:
+        return history
+    if _messages_chars(history) <= budget:
+        return history
+    first = history[0]
+    last = history[-1]
+    if len(history) == 1:
+        return history
+    middle = history[1:-1]
+    kept = [first] + middle + [last]
+    while len(kept) > 2 and _messages_chars(kept) > budget:
+        # ältesten Turn nach dem ersten User droppen
+        kept.pop(1)
+        if len(kept) > 2 and kept[1].get("role") == "assistant":
+            # dangling assistant ohne vorherigen user-tool: ok, nächste Runde
+            pass
+    if _messages_chars(kept) > budget and len(kept) > 2:
+        kept = [first, last]
+    return kept
+
+
+def repeat_tool_key(tool_name, args):
+    args = args or {}
+    if tool_name == "Grep":
+        return (
+            "Grep",
+            str(args.get("pattern") or ""),
+            str(args.get("path") or "."),
+            bool(args.get("case_insensitive")),
+        )
+    if tool_name == "ListDir":
+        return (
+            "ListDir",
+            str(args.get("path") or "."),
+            bool(args.get("recursive")),
+        )
+    return None
+
+
+def is_retryable_write_fail(tool_name, result):
+    err = str((result or {}).get("error") or "")
+    if tool_name != "SearchReplace":
+        return False
+    return (
+        "0 Treffer" in err
+        or "old-String nicht gefunden" in err
+        or ("kommt" in err and "Treffer" in err)
+    )
+
+
+def should_hard_stop(tool_name, result):
+    """Hart tot: Deny/🔒/Nutzer-Ablehnung/Shell-Timeout. SearchReplace-Treffer nicht."""
+    err = str((result or {}).get("error") or "")
+    payload = (result or {}).get("result")
+    if not isinstance(payload, dict):
+        payload = {}
+    low = err.lower()
+    if "vom nutzer" in low and "abgelehnt" in low:
+        return True
+    if "private" in low or "🔒" in err:
+        return True
+    if tool_name == "RunCommand" and payload.get("timeout"):
+        return True
+    if is_retryable_write_fail(tool_name, result):
+        return False
+    return False
+
+
+def pick_test_command(root):
+    import os as _os
+    if not root or not _os.path.isdir(root):
+        return None
+    if _os.path.isfile(_os.path.join(root, "package.json")):
+        return "npm test"
+    if (
+        _os.path.isfile(_os.path.join(root, "pytest.ini"))
+        or _os.path.isfile(_os.path.join(root, "pyproject.toml"))
+        or _os.path.isdir(_os.path.join(root, "tests"))
+    ):
+        return "pytest"
+    return None
+
+
+def run_workspace_tests(roots, _emit=None):
+    """Whitelist-Test je beschriebenem Root. Kein service:*."""
+    import os as _os
+    seen = set()
+    for root in roots or []:
+        try:
+            real = _os.path.realpath(root)
+        except OSError:
+            continue
+        if real in seen or not _os.path.isdir(real):
+            continue
+        seen.add(real)
+        cmd = pick_test_command(real)
+        if not cmd:
+            continue
+        label = _os.path.basename(real.rstrip(_os.sep)) or real
+        if _emit:
+            _emit({
+                "type": "step",
+                "action": "RunCommand",
+                "status": "start",
+                "detail": f"Test {cmd} · {label}",
+            })
+        try:
+            res = code_tools.run_command(cmd, cwd=real, timeout=120, allow_elevated=False)
+        except Exception as e:
+            if _emit:
+                _emit({
+                    "type": "step",
+                    "action": "RunCommand",
+                    "status": "error",
+                    "detail": str(e)[:200],
+                })
+            return {
+                "ok": False,
+                "error": f"{cmd} in {label}: {e}",
+                "root": real,
+                "command": cmd,
+            }
+        if res.get("timeout") or int(res.get("exit_code") or 0) != 0:
+            tail = (res.get("stderr") or res.get("stdout") or "Test fehlgeschlagen")[:400]
+            if _emit:
+                _emit({
+                    "type": "step",
+                    "action": "RunCommand",
+                    "status": "error",
+                    "detail": tail[:200],
+                })
+            return {
+                "ok": False,
+                "error": f"{cmd} in {label} exit {res.get('exit_code')}: {tail}",
+                "root": real,
+                "command": cmd,
+            }
+        if _emit:
+            _emit({
+                "type": "step",
+                "action": "RunCommand",
+                "status": "done",
+                "detail": f"{cmd} ok · {label}",
+            })
+    return {"ok": True}
+
+
 def _call_code_llm(messages, temperature=0.2, images=None):
-    """OpenRouter-Chat mit CODE-Modell (temporärer Model-Swap am Provider).
+    """CODE-Denker: echte messages[], Trim ältester Turns, letztes Tool bleibt.
 
     images: optionale OpenAI image_url-Parts (Vision). Viele Code-Modelle
     (DeepSeek Flash) unterstützen KEINE Vision — dann kommt ein klarer API-Fehler.
     """
     provider = llm.get_provider()
-    # Mit Bildern: Vision-Modell (Luna), sonst DeepSeek CODE
     if images:
         primary = getattr(config, "CODE_VISION_MODEL", None) or "openai/gpt-5.6-luna"
         fallback = getattr(config, "AGENT_OPENROUTER_FALLBACK_MODEL", None)
@@ -127,49 +377,62 @@ def _call_code_llm(messages, temperature=0.2, images=None):
     old_fb = getattr(provider, "fallback_model", None)
     try:
         provider.model = primary
-        # Empty/None fallback = no secondary model (UI may clear free fallback)
         provider.fallback_model = fallback if fallback else None
-        # Flatten messages to system+user style when possible
-        system_parts = []
-        user_parts = []
-        for m in messages:
-            role = m.get("role")
-            content = m.get("content") or ""
-            if isinstance(content, list):
-                content = "\n".join(
-                    str(p.get("text") or "")
-                    for p in content
-                    if isinstance(p, dict) and p.get("type") == "text"
-                )
-            if role == "system":
-                system_parts.append(content)
-            else:
-                user_parts.append(f"{role}: {content}" if role != "user" else content)
-        system = "\n\n".join(system_parts) if system_parts else _CODE_ROLE
-        if images:
-            system = (
-                system
+        payload = []
+        for m in messages or []:
+            payload.append({
+                "role": m.get("role") or "user",
+                "content": m.get("content") or "",
+            })
+        if not payload:
+            payload = [{"role": "system", "content": _CODE_ROLE}]
+        if payload[0].get("role") == "system" and images:
+            payload[0]["content"] = (
+                str(payload[0].get("content") or "")
                 + "\nDu kannst angehängte Screenshots/Bilder SEHEN (Vision), "
                 "falls das Modell es unterstützt. Nutze sie für UI-Bugs und Layout."
             )
-        user = "\n\n".join(user_parts)
-        # Datenschutz: CODE darf mehr Kontext (Diffs), aber Cap behalten
-        max_chars = int(getattr(config, "EXTERNAL_MAX_CHARS", 4000) or 4000)
-        # Für Code: höherer Default (16k), außer explizit 0=unbegrenzt
-        code_cap = int(os_environ_int("CODE_EXTERNAL_MAX_CHARS", 16000))
-        if code_cap > 0 and len(user) > code_cap:
-            user = user[:code_cap] + "\n…[gekürzt]"
-        # Hartes Total-Timeout (CODE_CHAT_TIMEOUT) — verhindert Einfrieren
-        # wenn OpenRouter/DeepSeek nie zurückkehrt.
-        chat_timeout = int(getattr(config, "CODE_CHAT_TIMEOUT", 60) or 60)
+        budget = int(getattr(config, "CODE_MESSAGE_CHARS", 64000) or 0)
+        if budget > 0:
+            sys_msgs = [m for m in payload if m.get("role") == "system"]
+            hist = [m for m in payload if m.get("role") != "system"]
+            reserved = _messages_chars(sys_msgs)
+            hist_budget = max(4000, budget - reserved)
+            hist = trim_code_history(hist, hist_budget)
+            payload = sys_msgs + hist
         if images:
             from .providers.openrouter import user_content_with_images
-            user_payload = user_content_with_images(user, images)
+            for m in payload:
+                if m.get("role") == "user":
+                    text = m.get("content") or ""
+                    if isinstance(text, list):
+                        text = "\n".join(
+                            str(p.get("text") or "")
+                            for p in text
+                            if isinstance(p, dict) and p.get("type") == "text"
+                        )
+                    m["content"] = user_content_with_images(text, images)
+                    break
+        chat_timeout = int(getattr(config, "CODE_CHAT_TIMEOUT", 180) or 180)
+        if hasattr(provider, "chat_messages"):
+            text = provider.chat_messages(
+                payload, temperature=temperature, timeout=chat_timeout
+            )
         else:
-            user_payload = user
-        text = provider.chat(
-            system, user_payload, temperature=temperature, timeout=chat_timeout
-        )
+            # Ältere Provider: letzter User + System (kein Flatten-Cap am Schwanz)
+            system = "\n\n".join(
+                str(m.get("content") or "")
+                for m in payload
+                if m.get("role") == "system"
+            )
+            last_user = ""
+            for m in reversed(payload):
+                if m.get("role") == "user":
+                    last_user = m.get("content") or ""
+                    break
+            text = provider.chat(
+                system, last_user, temperature=temperature, timeout=chat_timeout
+            )
         return text or ""
     finally:
         provider.model = old_model
@@ -314,6 +577,7 @@ def run_code(
     system = (
         _CODE_ROLE
         + _shared_contract_snippet()
+        + workspace_orient_block()
         + "\n\n"
         + _tool_schema()
         + "\n\nWICHTIG: Wenn du ein Werkzeug brauchst, antworte NUR mit JSON "
@@ -425,8 +689,8 @@ def _continue_from_state(state, allow_pending, confirm, max_rounds, on_event, _e
         error=(result.get("error") or "")[:120] or None,
     )
 
-    # Hard-stop bei Fail nach Freigabe (sichtbarer Tiger-Tod)
-    if not result.get("ok"):
+    # Nach Freigabe: Deny/Timeout hart; SearchReplace-Treffer zurück in die Loop
+    if not result.get("ok") and should_hard_stop(tool_name, result):
         answer = _hard_fail_answer(tool_name, result)
         _emit({"type": "answer", "status": "content", "text": answer})
         return {
@@ -480,6 +744,50 @@ def _loop(
     images=None,
 ):
     images = list(images or [])
+    written_roots = set()
+    repeat_counts = {}
+
+    def _finish(answer, *, ok=True, hard=False, error=None):
+        if written_roots:
+            tres = run_workspace_tests(list(written_roots), _emit=_emit)
+            if not tres.get("ok"):
+                fail = _hard_fail_answer(
+                    "RunCommand",
+                    {"error": tres.get("error") or "Test fehlgeschlagen"},
+                )
+                _emit({"type": "answer", "status": "content", "text": fail})
+                steps.append({
+                    "step": "RunCommand",
+                    "status": "error",
+                    "detail": (tres.get("error") or "")[:200],
+                })
+                return {
+                    "ok": False,
+                    "answer": fail,
+                    "rounds": rounds,
+                    "tool_calls": tool_calls,
+                    "pending_confirmation": False,
+                    "hard_error": True,
+                    "error": tres.get("error"),
+                    "trace": _build_trace(
+                        tool_calls, tool_results, steps=steps, model=model_name
+                    ),
+                }
+        if answer:
+            _emit({"type": "answer", "status": "content", "text": answer})
+        return {
+            "ok": ok,
+            "answer": answer or "",
+            "rounds": rounds,
+            "tool_calls": tool_calls,
+            "pending_confirmation": False,
+            "hard_error": bool(hard),
+            "error": error,
+            "trace": _build_trace(
+                tool_calls, tool_results, steps=steps, model=model_name
+            ),
+        }
+
     while rounds < max_rounds:
         rounds += 1
         messages = [{"role": "system", "content": system}] + history
@@ -487,15 +795,17 @@ def _loop(
             "type": "step",
             "action": "OpenRouter",
             "status": "start",
-            "detail": f"DeepSeek CODE ({model_name})",
+            "detail": llm.thinker_step_detail("code", model=model_name),
         })
         try:
             reply = _call_code_llm(messages, images=images or None)
         except Exception as e:
             _emit({"type": "step", "action": "OpenRouter", "status": "error", "detail": str(e)[:80]})
+            err_answer = f"CODE-Denker fehlgeschlagen: {e}"
+            _emit({"type": "answer", "status": "content", "text": err_answer})
             return {
                 "ok": False,
-                "answer": f"CODE-Denker fehlgeschlagen: {e}",
+                "answer": err_answer,
                 "rounds": rounds,
                 "tool_calls": tool_calls,
                 "pending_confirmation": False,
@@ -505,10 +815,15 @@ def _loop(
 
         parsed = tool_registry.try_parse_tool_call(reply)
         if parsed is None:
-            # Nur echte Nutzerantworten streamen — nie Tool-JSON als Answer.
-            answer = (reply or "").strip()
-            if answer:
-                _emit({"type": "answer", "status": "content", "text": answer})
+            # Nur echte Nutzerantworten streamen — nie Tool-JSON/DSML als Answer.
+            if tool_registry.looks_like_dsml(reply):
+                prose = tool_registry.prose_before_dsml(reply)
+                answer = prose or (
+                    "Denker hat einen Tool-Call im DSML-Format geschickt, "
+                    "der sich nicht lesen ließ. Bitte die Anfrage nochmal senden."
+                )
+            else:
+                answer = (reply or "").strip()
             steps.append({"step": "answer", "status": "success", "detail": f"{len(answer)} Zeichen"})
             log.log("code_reply", rounds=rounds, direct=True, chars=len(answer))
             try:
@@ -516,18 +831,50 @@ def _loop(
                 active = getattr(p, "_active_model", None) or model_name
             except Exception:
                 active = model_name
-            return {
-                "ok": True,
-                "answer": answer,
-                "rounds": rounds,
-                "tool_calls": tool_calls,
-                "pending_confirmation": False,
-                "trace": _build_trace(tool_calls, tool_results, steps=steps, model=active),
-            }
+            model_name = active
+            return _finish(answer, ok=True)
 
         tool_name, args = parsed
         args = args or {}
         _emit({"type": "step", "action": tool_name, "status": "start", "detail": None})
+
+        rkey = repeat_tool_key(tool_name, args)
+        if rkey is not None:
+            repeat_counts[rkey] = repeat_counts.get(rkey, 0) + 1
+            if repeat_counts[rkey] >= 3:
+                result = {
+                    "ok": False,
+                    "result": None,
+                    "error": (
+                        "Gleicher Grep/ListDir zum 3. Mal. "
+                        "CONTEXT-Map nutzen oder auf Deutsch antworten — nicht weiter walken."
+                    ),
+                }
+                err_detail = result["error"][:200]
+                _emit({
+                    "type": "step",
+                    "action": tool_name,
+                    "status": "error",
+                    "detail": err_detail,
+                })
+                tool_calls.append({"tool": tool_name, "args": args, "ok": False})
+                tool_results.append({"tool": tool_name, "args": args, "result": result})
+                steps.append({
+                    "step": tool_name,
+                    "status": "error",
+                    "detail": err_detail,
+                })
+                history.append({"role": "assistant", "content": reply})
+                history.append({
+                    "role": "user",
+                    "content": (
+                        f"Tool-Ergebnis für '{tool_name}':\n"
+                        f"{json.dumps(result, ensure_ascii=False, default=str)}\n\n"
+                        "Wähle das nächste Tool (JSON) oder antworte auf Deutsch."
+                    ),
+                })
+                log.log("code_tool", tool=tool_name, rounds=rounds, ok=False, repeat=True)
+                continue
 
         # Policy: allow | confirm (elevated) | deny
         decision = code_tools.permission_decision(tool_name, args)
@@ -631,14 +978,17 @@ def _loop(
                     token=token[:8],
                     elevated=bool(decision.get("elevated")),
                 )
+                # Primärspur = Status (Vertrauen: kein stilles Warten ohne Text).
+                status_answer = (
+                    f"Freigabe nötig für **{tool_name}**"
+                    + (f" — {risk}" if risk else "")
+                    + f".\n\n```\n{preview[:2000]}\n```\n\n"
+                    "Bitte in Glyph erlauben oder ablehnen."
+                )
+                _emit({"type": "answer", "status": "content", "text": status_answer})
                 return {
                     "ok": True,
-                    "answer": (
-                        f"Freigabe nötig für **{tool_name}**"
-                        + (f" — {risk}" if risk else "")
-                        + f".\n\n```\n{preview[:2000]}\n```\n\n"
-                        "Bitte in Glyph erlauben oder ablehnen."
-                    ),
+                    "answer": status_answer,
                     "rounds": rounds,
                     "tool_calls": tool_calls,
                     "pending_confirmation": True,
@@ -694,29 +1044,16 @@ def _loop(
             error=(result.get("error") or "")[:120] or None,
         )
 
-        # Write/Shell-Fail: hard stop + Banner-fähig
-        if not result.get("ok") and _is_write_tool(tool_name):
+        if result.get("ok") and tool_name in ("WriteFile", "SearchReplace"):
+            payload = result.get("result") if isinstance(result.get("result"), dict) else {}
+            root = payload.get("root")
+            if root:
+                written_roots.add(root)
+
+        if should_hard_stop(tool_name, result):
             answer = _hard_fail_answer(tool_name, result)
-            _emit({"type": "answer", "status": "content", "text": answer})
-            return {
-                "ok": False,
-                "answer": answer,
-                "rounds": rounds,
-                "tool_calls": tool_calls,
-                "pending_confirmation": False,
-                "hard_error": True,
-                "error": result.get("error") or f"{tool_name} fehlgeschlagen",
-                "trace": _build_trace(
-                    tool_calls, tool_results, steps=steps, model=model_name
-                ),
-            }
+            return _finish(answer, ok=False, hard=True, error=result.get("error"))
 
     steps.append({"step": "answer", "status": "error", "detail": "Runden-Limit"})
-    return {
-        "ok": False,
-        "answer": "Zu viele Tool-Runden im CODE-Modus — gestoppt (Schleifenschutz).",
-        "rounds": rounds,
-        "tool_calls": tool_calls,
-        "pending_confirmation": False,
-        "trace": _build_trace(tool_calls, tool_results, steps=steps, model=model_name),
-    }
+    limit_msg = "Zu viele Tool-Runden im CODE-Modus — gestoppt (Schleifenschutz)."
+    return _finish(limit_msg, ok=False, error="Runden-Limit")
