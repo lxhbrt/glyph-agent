@@ -5,17 +5,57 @@ Provider-Factory — wählt den aktiven Modell-Provider anhand der Konfiguration
 Der Rest des Codes (Agent, CLI) bezieht den Provider NUR über get_provider()
 und kennt nie die konkrete Klasse. Damit bleibt der Modellaustausch zentral
 (in core/config.py gesteuert).
+
+Chat-Provider: direct | openrouter | fallback.
+Kein lokaler Chat-Provider.
 """
 from .. import config
-from .ollama import OllamaProvider
+from .direct import DirectProvider
 from .mlx import MLXProvider
 from .openrouter import OpenRouterProvider
 from .fallback import FallbackProvider
 
+def _config_fallback(*attrs, default="deepseek/deepseek-v4-flash-0731"):
+    """Leerer String aus Hot-Apply = kein Fallback; sonst Config-Wert oder Default."""
+    for name in attrs:
+        if not hasattr(config, name):
+            continue
+        raw = getattr(config, name)
+        if raw == "":
+            return None
+        if raw:
+            return raw
+    return default
+
+
+def _make_direct():
+    return DirectProvider(
+        model=getattr(config, "AGENT_OPENROUTER_MODEL", None) or "deepseek-v4-pro",
+        fallback_model=_config_fallback("AGENT_OPENROUTER_FALLBACK_MODEL"),
+    )
+
+
+def _make_openrouter():
+    mode = str(getattr(config, "MODE", "agent") or "agent").lower()
+    if mode == "openrouter-chat":
+        primary = getattr(config, "OPENROUTER_MODEL", None) or "deepseek-v4-pro"
+        fb = _config_fallback("OPENROUTER_FALLBACK_MODEL")
+    else:
+        primary = (
+            getattr(config, "AGENT_OPENROUTER_MODEL", None)
+            or getattr(config, "OPENROUTER_MODEL", None)
+            or "deepseek-v4-pro"
+        )
+        fb = _config_fallback(
+            "AGENT_OPENROUTER_FALLBACK_MODEL", "OPENROUTER_FALLBACK_MODEL"
+        )
+    return OpenRouterProvider(model=primary, fallback_model=fb)
+
+
 _PROVIDERS = {
-    "ollama": lambda: OllamaProvider(),
     "mlx": lambda: MLXProvider(),
-    "openrouter": lambda: OpenRouterProvider(),
+    "direct": _make_direct,
+    "openrouter": _make_openrouter,
     "fallback": lambda: FallbackProvider(),
 }
 
@@ -24,15 +64,19 @@ _singleton = None
 
 def get_provider():
     """
-    Liefert den aktiven ModelProvider (Singleton). Auswahl über
-    config.PROVIDER ('ollama' | 'mlx'). Fällt bei unbekanntem Wert auf ollama.
+    Liefert den aktiven ModelProvider (Singleton).
+    Auswahl über config.PROVIDER ('direct' | 'openrouter' | 'fallback' | 'mlx').
+    Unbekannt → direct (B+-Default).
     """
     global _singleton
     if _singleton is None:
-        name = getattr(config, "PROVIDER", "ollama") or "ollama"
+        name = getattr(config, "PROVIDER", "direct") or "direct"
+        # Veralteter Name "ollama" als Chat-Provider: hart auf direct umbiegen.
+        if name == "ollama":
+            name = "direct"
         factory = _PROVIDERS.get(name)
         if factory is None:
-            raise ValueError(f"Unbekannter Provider-Konfiguration: {name}")
+            raise ValueError(f"Unbekannte Provider-Konfiguration: {name}")
         _singleton = factory()
     return _singleton
 

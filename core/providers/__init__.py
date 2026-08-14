@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-ModelProvider — stabile Modell-Schnittstelle (austauschbarer Modell-Adapters).
+ModelProvider — stabile Modell-Schnittstelle (austauschbarer Modell-Adapter).
 
 Der Agent (core/agent.py) spricht NUR mit dieser Schnittstelle, nie direkt
-mit einem konkreten Provider (Ollama/MLX/sonst). Damit bleibt Qwen, Ollama
-oder das gesamte lokale Modell austauschbar, ohne die Architektur zu ändern:
+mit einem konkreten Provider. Chat-Denker: Direct Pro/Flash → OpenRouter Flash-0731.
 
     Agent
      └── ModelProvider            <-- diese Datei (Schnittstelle)
-           ├── OllamaProvider     <-- core/providers/ollama.py
-           └── MLXProvider        <-- core/providers/mlx.py (später)
+           ├── DirectProvider     <-- core/providers/direct.py
+           ├── OpenRouterProvider <-- core/providers/openrouter.py
+           └── FallbackProvider   <-- core/providers/fallback.py (Alias-Kette)
 
 Schnittstellen-Methoden (fester Vertrag, bleibt stabil):
     - generate(prompt, temperature, num_ctx) -> str
@@ -21,7 +21,6 @@ from abc import ABC, abstractmethod
 class ModelProvider(ABC):
     """Abstrakte Schnittstelle. Alle konkreten Provider implementieren sie."""
 
-    # --- Einzel-Aufrufe (der Agent nutzt diese; nie Provider-Details) ---
     @abstractmethod
     def generate(self, prompt, temperature=0.3, num_ctx=8192):
         """Freier Textgenerator (ohne Chat-Verlauf). Liefert str."""
@@ -30,13 +29,12 @@ class ModelProvider(ABC):
     def chat(self, system, user, temperature=0.3, num_ctx=8192):
         """Chat mit System-Prompt. Liefert str."""
 
-    # --- Info (für Logs/UI) ---
     @property
     @abstractmethod
     def provider_name(self):
-        """Z. B. 'ollama' oder 'mlx'."""
+        """Z. B. 'openrouter' oder 'fallback'."""
 
     @property
     @abstractmethod
     def model_name(self):
-        """Z. B. 'qwen-solid' oder 'Qwen3.5-9B'."""
+        """Z. B. 'deepseek-v4-pro' oder Kette 'pro → flash-0731'."""

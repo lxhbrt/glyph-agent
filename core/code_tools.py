@@ -1,0 +1,928 @@
+# -*- coding: utf-8 -*-
+"""
+Code-Tools für den ^_Code-Modus (C′).
+
+Nur Workspace-Roots, Diff+Backup beim Schreiben, Shell nur per Whitelist.
+Kein VaultFind, keine Obsidian-Pfade — getrennte Sicherheitsdomäne vom Vault-Agenten.
+"""
+from __future__ import annotations
+
+import difflib
+import os
+import re
+import shlex
+import subprocess
+import time
+from pathlib import Path
+
+from . import config, log
+
+# Absolute Maxima (Defense in Depth)
+_MAX_READ_BYTES = 512 * 1024
+_MAX_WRITE_BYTES = 1024 * 1024
+_MAX_LIST_ENTRIES = 200
+_MAX_LIST_RECURSIVE = 400
+_MAX_LIST_DEPTH = 2
+_MAX_CMD_OUTPUT = 80_000
+_MAX_GREP_HITS = 50
+_MAX_GREP_FILE_BYTES = 512 * 1024
+_SKIP_DIR_NAMES = {
+    ".git", "node_modules", "__pycache__", ".venv", "venv",
+    "dist", "build", ".tox", ".mypy_cache", ".pytest_cache",
+}
+
+
+def workspace_roots():
+    """Kanonische erlaubte Roots (realpath) — SoT workspaces.json, Fallback Env/Config.
+
+    Store geladen + nichts accessible → [] (kein Default-rw).
+    CODE_WORKSPACE_ROOTS nur wenn Store fehlt oder CODE_WORKSPACES_USE_REGISTRY=false.
+    """
+    if getattr(config, "CODE_WORKSPACES_USE_REGISTRY", True):
+        try:
+            from . import workspaces_registry as wr
+            wr.load_store()  # Datei existiert oder wurde geseedet
+            return list(wr.accessible_roots())  # auch []
+        except Exception:
+            pass
+    roots = []
+    seen = set()
+    for r in getattr(config, "CODE_WORKSPACE_ROOTS", []) or []:
+        r = (r or "").strip()
+        if not r:
+            continue
+        try:
+            expanded = os.path.expanduser(r)
+            if not os.path.isdir(expanded):
+                continue
+            real = os.path.realpath(expanded)
+        except OSError:
+            continue
+        if real in seen:
+            continue
+        seen.add(real)
+        roots.append(real)
+    return roots
+
+
+def _ordered_roots():
+    """Primary first, then remaining accessible roots."""
+    roots = workspace_roots()
+    if not roots:
+        return []
+    primary = None
+    if getattr(config, "CODE_WORKSPACES_USE_REGISTRY", True):
+        try:
+            from . import workspaces_registry as wr
+            primary = wr.primary_root()
+        except Exception:
+            primary = None
+    if primary and primary in roots:
+        return [primary] + [r for r in roots if r != primary]
+    return list(roots)
+
+
+def _resolve_path(path):
+    """
+    Löst path relativ zu einem Workspace-Root auf.
+    Absoluter Pfad: muss unter einem Root liegen.
+    Relativer Pfad: Primary-Root zuerst, dann übrige.
+    Liefert (abs_path, root) oder (None, None).
+    """
+    if path is None or str(path).strip() == "":
+        return None, None
+    raw = str(path).strip()
+    roots = _ordered_roots()
+    if not roots:
+        return None, None
+
+    if os.path.isabs(raw):
+        cand = os.path.realpath(raw)
+        # longest matching root wins
+        best = None
+        best_len = -1
+        for root in roots:
+            if cand == root or cand.startswith(root + os.sep):
+                if len(root) > best_len:
+                    best = (cand, root)
+                    best_len = len(root)
+        return best if best else (None, None)
+
+    # Relativ: Primary zuerst
+    for root in roots:
+        cand = os.path.realpath(os.path.join(root, raw))
+        if cand == root or cand.startswith(root + os.sep):
+            return cand, root
+    return None, None
+
+
+def mode_for_resolved(root):
+    """Workspace-Mode für ein Root: r | rw | private | None."""
+    if not root:
+        return None
+    if not getattr(config, "CODE_WORKSPACES_USE_REGISTRY", True):
+        return "rw"  # Tests / Legacy-Config: r+w
+    try:
+        from . import workspaces_registry as wr
+        return wr.mode_for_root(root) or "r"
+    except Exception:
+        return "rw"
+
+
+def _rel_display(abs_path, root):
+    try:
+        return os.path.relpath(abs_path, root)
+    except ValueError:
+        return abs_path
+
+
+def list_dir(path=".", recursive=False, max_depth=None):
+    """Listet Verzeichnis unter Workspace-Root.
+
+    recursive=True: max. Tiefe 2 (cap), mit Gesamteinträge-Cap.
+    """
+    abs_path, root = _resolve_path(path or ".")
+    if not abs_path:
+        raise ValueError(f"Pfad außerhalb der Workspace-Roots: {path}")
+    if not os.path.isdir(abs_path):
+        raise ValueError(f"Kein Verzeichnis: {path}")
+
+    want_rec = bool(recursive)
+    depth_cap = _MAX_LIST_DEPTH
+    if max_depth is not None:
+        try:
+            depth_cap = max(0, min(int(max_depth), _MAX_LIST_DEPTH))
+        except (TypeError, ValueError):
+            depth_cap = _MAX_LIST_DEPTH
+
+    entries = []
+    truncated = False
+
+    if not want_rec:
+        try:
+            names = sorted(os.listdir(abs_path))
+        except OSError as e:
+            raise ValueError(str(e)) from e
+        for name in names[:_MAX_LIST_ENTRIES]:
+            full = os.path.join(abs_path, name)
+            kind = "dir" if os.path.isdir(full) else "file"
+            try:
+                size = os.path.getsize(full) if kind == "file" else None
+            except OSError:
+                size = None
+            entries.append({"name": name, "kind": kind, "size": size})
+        truncated = len(names) > _MAX_LIST_ENTRIES
+    else:
+        # Rekursiv mit Depth- und Entry-Cap
+        def _walk(cur, depth):
+            nonlocal truncated
+            try:
+                names = sorted(os.listdir(cur))
+            except OSError:
+                return
+            for name in names:
+                if len(entries) >= _MAX_LIST_RECURSIVE:
+                    truncated = True
+                    return
+                if name in _SKIP_DIR_NAMES or name.startswith("."):
+                    # .git etc. überspringen; versteckte nur flach erlauben wenn nicht skip
+                    if name in _SKIP_DIR_NAMES:
+                        continue
+                full = os.path.join(cur, name)
+                rel = os.path.relpath(full, abs_path)
+                kind = "dir" if os.path.isdir(full) else "file"
+                try:
+                    size = os.path.getsize(full) if kind == "file" else None
+                except OSError:
+                    size = None
+                entries.append({"name": rel.replace(os.sep, "/"), "kind": kind, "size": size})
+                if kind == "dir" and depth < depth_cap and name not in _SKIP_DIR_NAMES:
+                    _walk(full, depth + 1)
+                if truncated:
+                    return
+
+        _walk(abs_path, 0)
+
+    log.log(
+        "code_list_dir",
+        path=_rel_display(abs_path, root),
+        n=len(entries),
+        recursive=want_rec,
+    )
+    return {
+        "path": _rel_display(abs_path, root),
+        "root": root,
+        "entries": entries,
+        "truncated": truncated,
+        "recursive": want_rec,
+        "max_depth": depth_cap if want_rec else 0,
+    }
+
+
+def read_file(path, max_bytes=None, offset=None, limit=None):
+    """Liest Textdatei (UTF-8, replacement) innerhalb der Roots.
+
+    offset/limit: optional Zeilen (1-basiert offset; limit = max. Zeilen).
+    """
+    abs_path, root = _resolve_path(path)
+    if not abs_path:
+        raise ValueError(f"Pfad außerhalb der Workspace-Roots: {path}")
+    if not os.path.isfile(abs_path):
+        raise ValueError(f"Datei nicht gefunden: {path}")
+    byte_limit = int(max_bytes or _MAX_READ_BYTES)
+    with open(abs_path, "rb") as f:
+        data = f.read(byte_limit + 1)
+    truncated = len(data) > byte_limit
+    data = data[:byte_limit]
+    text = data.decode("utf-8", errors="replace")
+
+    line_offset = None
+    line_limit = None
+    total_lines = None
+    if offset is not None or limit is not None:
+        lines = text.splitlines(keepends=True)
+        total_lines = len(lines)
+        try:
+            # 1-basiert; offset=1 = erste Zeile; offset=0/None = ab Anfang
+            start = int(offset) if offset is not None else 1
+        except (TypeError, ValueError):
+            start = 1
+        if start < 1:
+            start = 1
+        try:
+            n = int(limit) if limit is not None else None
+        except (TypeError, ValueError):
+            n = None
+        line_offset = start
+        line_limit = n
+        idx0 = start - 1
+        if n is None:
+            slice_lines = lines[idx0:]
+        else:
+            slice_lines = lines[idx0 : idx0 + max(0, n)]
+        text = "".join(slice_lines)
+        # Zeilen-Fenster: truncated wenn nicht alle Zeilen oder Byte-Cap
+        if idx0 + len(slice_lines) < total_lines:
+            truncated = True
+
+    log.log(
+        "code_read_file",
+        path=_rel_display(abs_path, root),
+        chars=len(text),
+        offset=line_offset,
+        limit=line_limit,
+    )
+    out = {
+        "path": _rel_display(abs_path, root),
+        "content": text,
+        "chars": len(text),
+        "truncated": truncated,
+    }
+    if line_offset is not None:
+        out["offset"] = line_offset
+        out["limit"] = line_limit
+        out["total_lines"] = total_lines
+    return out
+
+
+def grep(pattern, path=".", max_hits=None, case_insensitive=False):
+    """
+    Sucht pattern in Dateien unter path (nur Workspace-Roots).
+    Nutzt `rg` wenn im PATH, sonst Python-Walk. Max. Treffer capped.
+    """
+    if not pattern or not str(pattern).strip():
+        raise ValueError("grep: pattern fehlt")
+    pattern = str(pattern)
+    abs_path, root = _resolve_path(path or ".")
+    if not abs_path:
+        raise ValueError(f"Pfad außerhalb der Workspace-Roots: {path}")
+    if not os.path.exists(abs_path):
+        raise ValueError(f"Pfad nicht gefunden: {path}")
+
+    cap = int(max_hits or _MAX_GREP_HITS)
+    cap = max(1, min(cap, 200))
+    ci = bool(case_insensitive)
+
+    hits = []
+    engine = "python"
+    # --- try ripgrep ---
+    import shutil
+    rg = shutil.which("rg")
+    if rg:
+        engine = "rg"
+        argv = [rg, "--line-number", "--no-heading", "--color", "never",
+                "--max-count", str(cap)]
+        if ci:
+            argv.append("-i")
+        # Skip heavy dirs
+        for d in _SKIP_DIR_NAMES:
+            argv.extend(["--glob", f"!{d}/**"])
+        argv.extend(["--", pattern, abs_path])
+        try:
+            proc = subprocess.run(
+                argv, capture_output=True, text=True, timeout=30, check=False,
+            )
+            # rg exit 1 = no matches; 0 = matches; 2 = error
+            if proc.returncode not in (0, 1):
+                engine = "python"  # fallback
+            else:
+                for line in (proc.stdout or "").splitlines():
+                    if len(hits) >= cap:
+                        break
+                    # format: path:lineno:text
+                    if ":" not in line:
+                        continue
+                    # split max 2 times from left for path that may contain :
+                    # rg uses path:line:content
+                    m = re.match(r"^(.*?):(\d+):(.*)$", line)
+                    if not m:
+                        continue
+                    fpath, lineno, content = m.group(1), int(m.group(2)), m.group(3)
+                    try:
+                        rel = os.path.relpath(fpath, root)
+                    except ValueError:
+                        rel = fpath
+                    hits.append({
+                        "path": rel.replace(os.sep, "/"),
+                        "line": lineno,
+                        "text": content[:500],
+                    })
+        except (subprocess.TimeoutExpired, OSError, FileNotFoundError):
+            engine = "python"
+            hits = []
+
+    if engine == "python":
+        hits = []
+        flags = re.IGNORECASE if ci else 0
+        try:
+            cre = re.compile(pattern, flags)
+        except re.error as e:
+            raise ValueError(f"Ungültiges Regex-Pattern: {e}") from e
+
+        def _search_file(fpath):
+            try:
+                if os.path.getsize(fpath) > _MAX_GREP_FILE_BYTES:
+                    return
+            except OSError:
+                return
+            try:
+                with open(fpath, "rb") as f:
+                    raw = f.read(_MAX_GREP_FILE_BYTES)
+            except OSError:
+                return
+            if b"\x00" in raw[:8000]:
+                return  # binär
+            text = raw.decode("utf-8", errors="replace")
+            for i, line in enumerate(text.splitlines(), 1):
+                if cre.search(line):
+                    try:
+                        rel = os.path.relpath(fpath, root)
+                    except ValueError:
+                        rel = fpath
+                    hits.append({
+                        "path": rel.replace(os.sep, "/"),
+                        "line": i,
+                        "text": line[:500],
+                    })
+                    if len(hits) >= cap:
+                        return
+
+        if os.path.isfile(abs_path):
+            _search_file(abs_path)
+        else:
+            for dirpath, dirnames, filenames in os.walk(abs_path):
+                dirnames[:] = [
+                    d for d in dirnames
+                    if d not in _SKIP_DIR_NAMES and not d.startswith(".")
+                ]
+                # Stay under root
+                try:
+                    real_dp = os.path.realpath(dirpath)
+                    if not (real_dp == root or real_dp.startswith(root + os.sep)):
+                        dirnames[:] = []
+                        continue
+                except OSError:
+                    continue
+                for fn in filenames:
+                    if len(hits) >= cap:
+                        break
+                    _search_file(os.path.join(dirpath, fn))
+                if len(hits) >= cap:
+                    break
+
+    truncated = len(hits) >= cap
+    log.log(
+        "code_grep",
+        pattern=pattern[:80],
+        path=_rel_display(abs_path, root),
+        hits=len(hits),
+        engine=engine,
+    )
+    return {
+        "pattern": pattern,
+        "path": _rel_display(abs_path, root),
+        "root": root,
+        "hits": hits,
+        "count": len(hits),
+        "truncated": truncated,
+        "engine": engine,
+    }
+
+
+def search_replace(path, old, new):
+    """
+    Ersetzt old→new exakt einmal in einer Datei (1 Treffer Pflicht).
+    Backup wie WriteFile. Kein Regex.
+    """
+    if old is None or str(old) == "":
+        raise ValueError("SearchReplace: old darf nicht leer sein")
+    old = str(old)
+    new = "" if new is None else str(new)
+    abs_path, root = _resolve_path(path)
+    if not abs_path:
+        raise ValueError(f"Pfad außerhalb der Workspace-Roots: {path}")
+    if not os.path.isfile(abs_path):
+        raise ValueError(f"Datei nicht gefunden: {path}")
+
+    with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
+        content = f.read()
+    count = content.count(old)
+    if count == 0:
+        raise ValueError("SearchReplace: old-String nicht gefunden (0 Treffer)")
+    if count > 1:
+        raise ValueError(
+            f"SearchReplace: old-String kommt {count}× vor — muss exakt 1 Treffer sein"
+        )
+    if old == new:
+        return {
+            "path": _rel_display(abs_path, root),
+            "applied": False,
+            "reason": "no_change",
+        }
+    new_content = content.replace(old, new, 1)
+    # reuse write_file for backup + atomic write
+    result = write_file(path, new_content)
+    result["replaced"] = True
+    result["old_chars"] = len(old)
+    result["new_chars"] = len(new)
+    log.log("code_search_replace", path=_rel_display(abs_path, root), applied=result.get("applied"))
+    return result
+
+
+def propose_write(path, content):
+    """Diff-Vorschau ohne Schreiben."""
+    abs_path, root = _resolve_path(path)
+    if not abs_path:
+        raise ValueError(f"Pfad außerhalb der Workspace-Roots: {path}")
+    content = content if content is not None else ""
+    if len(content.encode("utf-8")) > _MAX_WRITE_BYTES:
+        raise ValueError(f"Inhalt zu groß (>{_MAX_WRITE_BYTES} Bytes)")
+    old = ""
+    exists = os.path.isfile(abs_path)
+    if exists:
+        with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
+            old = f.read()
+    old_lines = old.splitlines(keepends=True)
+    new_lines = str(content).splitlines(keepends=True)
+    rel = _rel_display(abs_path, root)
+    diff = "".join(
+        difflib.unified_diff(
+            old_lines,
+            new_lines,
+            fromfile=f"a/{rel}",
+            tofile=f"b/{rel}",
+            lineterm="",
+        )
+    )
+    return {
+        "path": rel,
+        "diff": diff,
+        "changed": old != content,
+        "exists": exists,
+        "old_chars": len(old),
+        "new_chars": len(content),
+    }
+
+
+def write_file(path, content):
+    """
+    Schreibt Datei mit Backup (wie Vault ApplyEdit, aber Workspace-Roots).
+    Kein Löschen, kein Umbenennen. Nur Workspace-Mode r+w.
+    """
+    abs_path, root = _resolve_path(path)
+    if not abs_path:
+        raise ValueError(f"Pfad außerhalb der Workspace-Roots: {path}")
+    mode = mode_for_resolved(root)
+    if mode != "rw":
+        raise ValueError(
+            f"Schreiben verboten: Workspace-Mode ist {mode or '?'} "
+            f"(braucht r+w) — Root {root}"
+        )
+    content = content if content is not None else ""
+    raw = str(content).encode("utf-8")
+    if len(raw) > _MAX_WRITE_BYTES:
+        raise ValueError(f"Inhalt zu groß (>{_MAX_WRITE_BYTES} Bytes)")
+
+    # Keine Directory-Traversal-Reste, Parent muss unter Root bleiben
+    parent = os.path.dirname(abs_path)
+    parent_real = os.path.realpath(parent) if os.path.isdir(parent) else os.path.realpath(
+        os.path.join(root, os.path.relpath(parent, root) if parent.startswith(root) else parent)
+    )
+    # Parent anlegen nur wenn unter root
+    if not (parent == root or parent.startswith(root + os.sep) or os.path.realpath(parent).startswith(root + os.sep) or os.path.realpath(parent) == root):
+        # join-basiert: parent of new file under root
+        if not abs_path.startswith(root + os.sep) and abs_path != root:
+            raise ValueError(f"Unsicherer Parent-Pfad: {path}")
+
+    os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+
+    old = ""
+    if os.path.isfile(abs_path):
+        with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
+            old = f.read()
+    if old == content:
+        return {
+            "path": _rel_display(abs_path, root),
+            "applied": False,
+            "reason": "no_change",
+        }
+
+    backup_dir = getattr(config, "CODE_BACKUP_DIR", None) or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "vault", "code_backups"
+    )
+    os.makedirs(backup_dir, exist_ok=True)
+    rel = _rel_display(abs_path, root)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    safe = rel.replace(os.sep, "__").replace("/", "__")
+    backup_file = os.path.join(backup_dir, f"{safe}.{stamp}.bak")
+    if old:
+        with open(backup_file, "w", encoding="utf-8") as f:
+            f.write(old)
+
+    tmp = abs_path + ".tmp-glyph-code"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(content)
+    os.replace(tmp, abs_path)
+
+    log.log(
+        "code_write_file",
+        path=rel,
+        backup=os.path.basename(backup_file) if old else None,
+        old_chars=len(old),
+        new_chars=len(content),
+    )
+    return {
+        "path": rel,
+        "applied": True,
+        "backup": os.path.basename(backup_file) if old else None,
+        "created": not bool(old),
+    }
+
+
+# --- Shell ---
+
+# Hart verboten — nie, auch nicht nach Elevated-Freigabe
+_HARD_DENY_PATTERNS = [
+    r"\brm\b",
+    r"\bmv\b",
+    r"\bchmod\b",
+    r"\bchown\b",
+    r"\bsudo\b",
+    r"\bdoas\b",
+    r"\bmkfs\b",
+    r"\bdd\b",
+    r">\s*/",
+    r"\bcurl\b.*\|\s*(ba)?sh",
+    r"\bwget\b.*\|\s*(ba)?sh",
+    r"\bshutdown\b",
+    r"\breboot\b",
+    r"\bkill\b",
+    r"\bkillall\b",
+    r"\blaunchctl\b",
+    r"\bdiskutil\b",
+    r"\bsecurity\b",
+    r"\bosascript\b",
+    r"`",
+    r"\$\(",
+]
+
+# Elevated: Popup (Einmal), dann ausführen — inkl. Compound und git push
+_ELEVATED_PATTERNS = [
+    (r"\bgit\s+push\b", "git push — schreibt Remote"),
+    (r"\bgit\s+pull\b", "git pull — ändert lokalen Stand vom Remote"),
+    (r"\bgit\s+fetch\b", "git fetch — holt Remote-Refs"),
+    (r"^npm\s+run\s+service(:|\b)", "npm run service:* — LaunchAgent/Service"),
+    (r"(?:&&|\|\||[;|])", "Compound/Pipe (&& ; | ||)"),
+]
+
+# Legacy alias for tests
+_DENY_PATTERNS = list(_HARD_DENY_PATTERNS) + [
+    r"\bgit\s+push\b",  # still "denied" without elevated_ok via classify
+]
+
+
+def _default_allow_patterns():
+    return list(getattr(config, "CODE_SHELL_ALLOW", None) or [])
+
+
+def shell_classify(command):
+    """
+    Klassifiziert Shell-Befehl.
+    Returns: (kind, reason)
+      kind: "allow" | "elevated" | "deny"
+      reason: human-readable (risk line or deny reason)
+    """
+    cmd = (command or "").strip()
+    if not cmd:
+        return "deny", "leerer Befehl"
+    if len(cmd) > 2000:
+        return "deny", "Befehl zu lang"
+    if "\n" in cmd or "\r" in cmd:
+        return "deny", "Mehrzeilige Befehle verboten"
+    for pat in _HARD_DENY_PATTERNS:
+        if re.search(pat, cmd, re.IGNORECASE):
+            return "deny", f"hart verboten: {pat}"
+    for pat, risk in _ELEVATED_PATTERNS:
+        if re.search(pat, cmd, re.IGNORECASE):
+            return "elevated", risk
+    allows = _default_allow_patterns()
+    if not allows:
+        return "deny", "keine Shell-Whitelist konfiguriert"
+    for pat in allows:
+        try:
+            if re.search(pat, cmd):
+                return "allow", None
+        except re.error:
+            continue
+    return "deny", "nicht in der Shell-Whitelist"
+
+
+def shell_allowed(command, *, allow_elevated=False):
+    """True, wenn command freigegeben werden darf (Whitelist oder elevated+Flag)."""
+    kind, reason = shell_classify(command)
+    if kind == "allow":
+        return True, None
+    if kind == "elevated":
+        if allow_elevated:
+            return True, None
+        return False, f"Elevated-Freigabe nötig: {reason}"
+    return False, reason
+
+
+def run_command(command, cwd=None, timeout=None, allow_elevated=False):
+    """
+    Führt Shell unter Workspace-Root aus.
+    Whitelist: shlex.split (shell=False).
+    Elevated Compound: bash -lc nach Freigabe (Hard-Deny gilt weiter).
+    """
+    kind, reason = shell_classify(command)
+    if kind == "deny":
+        raise ValueError(f"Shell abgelehnt: {reason}")
+    if kind == "elevated" and not allow_elevated:
+        raise ValueError(f"Shell abgelehnt: Elevated-Freigabe nötig: {reason}")
+
+    roots = _ordered_roots()
+    if not roots:
+        raise ValueError("Keine Workspace-Roots konfiguriert")
+
+    work = cwd or roots[0]
+    abs_cwd, root = _resolve_path(work)
+    if not abs_cwd or not os.path.isdir(abs_cwd):
+        abs_cwd, root = roots[0], roots[0]
+        if cwd:
+            raise ValueError(f"cwd außerhalb Workspace-Roots: {cwd}")
+
+    mode = mode_for_resolved(root)
+    if mode != "rw":
+        raise ValueError(
+            f"Shell verboten: Workspace-Mode ist {mode or '?'} (braucht r+w)"
+        )
+
+    timeout_s = int(timeout or getattr(config, "CODE_SHELL_TIMEOUT", 60) or 60)
+    timeout_s = max(1, min(timeout_s, 120))
+
+    use_shell = kind == "elevated" and bool(
+        re.search(r"(?:&&|\|\||[;|])", (command or "").strip())
+    )
+    if use_shell:
+        argv = ["bash", "-lc", command]
+        bin_name = "bash"
+    else:
+        try:
+            argv = shlex.split(command)
+        except ValueError as e:
+            raise ValueError(f"Befehl nicht parsbar: {e}") from e
+        if not argv:
+            raise ValueError("leerer Befehl")
+        bin_name = os.path.basename(argv[0])
+
+    env = os.environ.copy()
+    env["LANG"] = env.get("LANG") or "en_US.UTF-8"
+
+    log.log(
+        "code_run_command",
+        cmd=command[:200],
+        cwd=_rel_display(abs_cwd, root),
+        elevated=bool(allow_elevated and kind == "elevated"),
+        shell_lc=use_shell,
+    )
+    try:
+        proc = subprocess.run(
+            argv,
+            cwd=abs_cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            env=env,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as e:
+        out = (e.stdout or "") if isinstance(e.stdout, str) else ""
+        err = (e.stderr or "") if isinstance(e.stderr, str) else f"Timeout nach {timeout_s}s"
+        return {
+            "command": command,
+            "cwd": _rel_display(abs_cwd, root),
+            "exit_code": -1,
+            "stdout": out[:_MAX_CMD_OUTPUT],
+            "stderr": err[:_MAX_CMD_OUTPUT],
+            "timeout": True,
+            "elevated": kind == "elevated",
+        }
+    except FileNotFoundError:
+        raise ValueError(f"Befehl nicht gefunden: {bin_name}") from None
+
+    stdout = (proc.stdout or "")[:_MAX_CMD_OUTPUT]
+    stderr = (proc.stderr or "")[:_MAX_CMD_OUTPUT]
+    return {
+        "command": command,
+        "cwd": _rel_display(abs_cwd, root),
+        "exit_code": proc.returncode,
+        "stdout": stdout,
+        "stderr": stderr,
+        "timeout": False,
+        "truncated": len(proc.stdout or "") > _MAX_CMD_OUTPUT
+        or len(proc.stderr or "") > _MAX_CMD_OUTPUT,
+        "elevated": kind == "elevated",
+    }
+
+
+def permission_decision(tool_name, args):
+    """
+    Policy für ^_Code-Tools.
+    Returns dict:
+      action: "allow" | "confirm" | "deny"
+      reason: str
+      elevated: bool
+      risk: str
+      preview: str
+    """
+    args = args or {}
+    name = tool_name or ""
+
+    if name in ("ListDir", "ReadFile", "Grep"):
+        path = args.get("path") or "."
+        abs_path, root = _resolve_path(path)
+        if not abs_path:
+            return {
+                "action": "deny",
+                "reason": f"Pfad außerhalb der Workspace-Roots: {path}",
+                "elevated": False,
+                "risk": "",
+                "preview": "",
+            }
+        return {
+            "action": "allow",
+            "reason": "",
+            "elevated": False,
+            "risk": "",
+            "preview": "",
+        }
+
+    if name in ("WriteFile", "SearchReplace"):
+        path = args.get("path")
+        abs_path, root = _resolve_path(path)
+        if not abs_path:
+            return {
+                "action": "deny",
+                "reason": f"Pfad außerhalb der Workspace-Roots: {path}",
+                "elevated": False,
+                "risk": "",
+                "preview": preview_for_confirm(name, args),
+            }
+        mode = mode_for_resolved(root)
+        if mode == "rw":
+            return {
+                "action": "allow",
+                "reason": "Workspace r+w — Write ohne Popup",
+                "elevated": False,
+                "risk": "",
+                "preview": preview_for_confirm(name, args),
+            }
+        return {
+            "action": "deny",
+            "reason": (
+                f"Schreiben verboten: Mode {mode or '?'} "
+                f"(braucht r+w) — {root}"
+            ),
+            "elevated": False,
+            "risk": "",
+            "preview": preview_for_confirm(name, args),
+        }
+
+    if name == "RunCommand":
+        cmd = args.get("command") or ""
+        cwd = args.get("cwd") or "."
+        abs_cwd, root = _resolve_path(cwd)
+        if not abs_cwd:
+            roots = _ordered_roots()
+            if not roots:
+                return {
+                    "action": "deny",
+                    "reason": "Keine Workspace-Roots",
+                    "elevated": False,
+                    "risk": "",
+                    "preview": preview_for_confirm(name, args),
+                }
+            abs_cwd, root = roots[0], roots[0]
+        mode = mode_for_resolved(root)
+        if mode != "rw":
+            return {
+                "action": "deny",
+                "reason": f"Shell verboten: Mode {mode or '?'} (braucht r+w)",
+                "elevated": False,
+                "risk": "",
+                "preview": preview_for_confirm(name, args),
+            }
+        kind, reason = shell_classify(cmd)
+        preview = preview_for_confirm(name, args)
+        if kind == "deny":
+            return {
+                "action": "deny",
+                "reason": f"Shell abgelehnt: {reason}",
+                "elevated": False,
+                "risk": "",
+                "preview": preview,
+            }
+        if kind == "elevated":
+            risk = reason or "Elevated Shell"
+            return {
+                "action": "confirm",
+                "reason": risk,
+                "elevated": True,
+                "risk": risk,
+                "preview": f"⚠ {risk}\n\n{preview}",
+            }
+        return {
+            "action": "allow",
+            "reason": "Whitelist-Shell unter r+w",
+            "elevated": False,
+            "risk": "",
+            "preview": preview,
+        }
+
+    # Unknown write-ish: confirm
+    if name:
+        return {
+            "action": "confirm",
+            "reason": "unbekanntes Tool",
+            "elevated": False,
+            "risk": "",
+            "preview": preview_for_confirm(name, args),
+        }
+    return {
+        "action": "deny",
+        "reason": "leeres Tool",
+        "elevated": False,
+        "risk": "",
+        "preview": "",
+    }
+
+
+def preview_for_confirm(tool_name, args):
+    """Kurzer Preview-Text für Glyph-Genehmigungsdialog."""
+    args = args or {}
+    if tool_name == "WriteFile":
+        try:
+            prop = propose_write(args.get("path"), args.get("content", ""))
+            diff = (prop.get("diff") or "")[:2500]
+            return f"WriteFile → {prop.get('path')}\n{diff or '(neue Datei / kein Diff)'}"
+        except Exception as e:
+            return f"WriteFile → {args.get('path')}: {e}"
+    if tool_name == "SearchReplace":
+        old = str(args.get("old") or "")
+        new = str(args.get("new") or "")
+        path = args.get("path")
+        preview_old = old if len(old) <= 400 else old[:400] + "…"
+        preview_new = new if len(new) <= 400 else new[:400] + "…"
+        return (
+            f"SearchReplace → {path}\n"
+            f"--- old ---\n{preview_old}\n"
+            f"+++ new ---\n{preview_new}"
+        )
+    if tool_name == "RunCommand":
+        kind, risk = shell_classify(args.get("command") or "")
+        base = f"RunCommand → {args.get('command')}\ncwd={args.get('cwd') or '.'}"
+        if kind == "elevated" and risk:
+            return f"⚠ {risk}\n{base}"
+        return base
+    return f"{tool_name}: {args}"

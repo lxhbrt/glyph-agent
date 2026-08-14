@@ -223,6 +223,13 @@ def test_5_tool_call_erkennung():
     r3 = tr.try_parse_tool_call(prosa)
     check("Prosa umschlossen -> Tool-Call", r3 is not None and r3[0] == "WebSearch", f"-> {r3}")
     check("kein Tool -> None", tr.try_parse_tool_call("Ich antworte normal.") is None)
+    dsml = (
+        '<||DSML||tool_calls><||DSML||invoke name="Grep">'
+        '<||DSML||parameter name="pattern" string="true">x</||DSML||parameter>'
+        "</||DSML||invoke></||DSML||tool_calls>"
+    )
+    r4 = tr.try_parse_tool_call(dsml)
+    check("DSML || -> Grep", r4 is not None and r4[0] == "Grep", f"-> {r4}")
 
 
 if __name__ == "__main__":

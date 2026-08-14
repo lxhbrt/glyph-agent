@@ -35,9 +35,10 @@ rm -f logs/vault_index.json
 echo "=== Rebuild mit bge-m3 ===" >> "$LOG"
 python3 -c "
 import sys; sys.path.insert(0,'.')
-from core import retrieval
+from core import config, retrieval
 import os
 os.environ['EMBED_MODEL']='bge-m3'
+config.reload_vault_paths()
 stats = retrieval.build_index_from_vault()
 print('discovered:', stats.get('discovered'))
 print('indexed:', stats.get('indexed'))
