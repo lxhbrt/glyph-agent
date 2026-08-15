@@ -210,6 +210,50 @@ def workspace_orient_block():
     )
 
 
+def _tool_result_summary(tool_name, result):
+    """Kurzer History-Eintrag statt vollem JSON-Dump, damit der Verlauf schlank bleibt.
+    Schwergewichtige Erfolge (ReadFile/SearchReplace/WriteFile) werden zusammengefasst;
+    Fehler und kompakte Treffer (Grep/ListDir) bleiben voll, da kurz und wichtig."""
+    ok = bool(result and result.get("ok"))
+    err = str((result or {}).get("error") or "").strip()
+    if not ok:
+        # Fehler voll behalten (Selbstkorrektur braucht den Kontext)
+        return (
+            f"Tool-Ergebnis für '{tool_name}':\n"
+            f"{json.dumps(result, ensure_ascii=False, default=str)}\n\n"
+            "Wähle das nächste Tool (JSON) oder antworte auf Deutsch."
+        )
+    if tool_name in ("ReadFile",):
+        body = (result.get("result") or {})
+        if isinstance(body, dict):
+            text = body.get("content") or body.get("text") or ""
+            chars = body.get("chars") or len(text)
+            head = str(text)[:400]
+            return (
+                f"Tool-Ergebnis für 'ReadFile' ({body.get('path') or ''}, ~{chars} Zeichen):\n"
+                f"```\n{head}...\n```\n"
+                "(Gekürzt. Bei Bedarf mit ReadFile + offset gezielt weiterlesen.)\n"
+                "Wähle das nächste Tool (JSON) oder antworte auf Deutsch."
+            )
+    if tool_name in ("SearchReplace", "WriteFile"):
+        body = (result.get("result") or {})
+        if isinstance(body, dict):
+            summary = (
+                f"Schreiben OK → {body.get('path') or '?'} "
+                f"({body.get('old_chars') or 0}→{body.get('new_chars') or 0} Zeichen)"
+            )
+            return (
+                f"Tool-Ergebnis für '{tool_name}':\n{summary}\n\n"
+                "Wähle das nächste Tool (JSON) oder antworte auf Deutsch."
+            )
+    # Standard: bleibt wie bisher
+    return (
+        f"Tool-Ergebnis für '{tool_name}':\n"
+        f"{json.dumps(result, ensure_ascii=False, default=str)}\n\n"
+        "Wähle das nächste Tool (JSON) oder antworte auf Deutsch."
+    )
+
+
 def trim_code_history(history, budget):
     """Älteste Turns weg. Erstes User + letztes Tool-Ergebnis bleiben."""
     history = list(history or [])
@@ -706,11 +750,7 @@ def _continue_from_state(state, allow_pending, confirm, max_rounds, on_event, _e
 
     history.append({
         "role": "user",
-        "content": (
-            f"Tool-Ergebnis für '{tool_name}':\n"
-            f"{json.dumps(result, ensure_ascii=False, default=str)}\n\n"
-            "Wähle das nächste Tool (JSON) oder antworte auf Deutsch."
-        ),
+        "content": _tool_result_summary(tool_name, result),
     })
 
     return _loop(
@@ -867,11 +907,7 @@ def _loop(
                 history.append({"role": "assistant", "content": reply})
                 history.append({
                     "role": "user",
-                    "content": (
-                        f"Tool-Ergebnis für '{tool_name}':\n"
-                        f"{json.dumps(result, ensure_ascii=False, default=str)}\n\n"
-                        "Wähle das nächste Tool (JSON) oder antworte auf Deutsch."
-                    ),
+                    "content": _tool_result_summary(tool_name, result),
                 })
                 log.log("code_tool", tool=tool_name, rounds=rounds, ok=False, repeat=True)
                 continue
@@ -920,11 +956,7 @@ def _loop(
             history.append({"role": "assistant", "content": reply})
             history.append({
                 "role": "user",
-                "content": (
-                    f"Tool-Ergebnis für '{tool_name}':\n"
-                    f"{json.dumps(result, ensure_ascii=False, default=str)}\n\n"
-                    "Wähle das nächste Tool (JSON) oder antworte auf Deutsch."
-                ),
+                "content": _tool_result_summary(tool_name, result),
             })
             continue
 
@@ -1030,11 +1062,7 @@ def _loop(
         history.append({"role": "assistant", "content": reply})
         history.append({
             "role": "user",
-            "content": (
-                f"Tool-Ergebnis für '{tool_name}':\n"
-                f"{json.dumps(result, ensure_ascii=False, default=str)}\n\n"
-                "Wähle das nächste Tool (JSON) oder antworte auf Deutsch."
-            ),
+            "content": _tool_result_summary(tool_name, result),
         })
         log.log(
             "code_tool",
