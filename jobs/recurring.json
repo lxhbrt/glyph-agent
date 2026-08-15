@@ -13,10 +13,10 @@
       "paused": false,
       "allow_write": true,
       "created_at": "2026-08-08T23:03:05+02:00",
-      "last_run_at": "2026-08-13T18:13:56+02:00",
+      "last_run_at": "2026-08-14T18:12:34+02:00",
       "last_status": "ok",
-      "last_answer_preview": "{\"tool\": \"ReadNote\", \"args\": {\"path\": \"HSEQ Sync/Vorlagen/Audit/Prompt - Auditnotizen auswerten und Auditbericht.md\"}}",
-      "last_stamp": "2026-08-13"
+      "last_answer_preview": "HSEQ: keine Änderungen.\n\nPrüfung Eingang (`HSEQ Sync/00 Arbeitsfluss/Eingang/`): 4 Rohnotizen + README, keine `VORLAGE`-Datei.\n\nVerarbeitungslog-Abgleich:\n- `2026-06-29 Internes Audit Rosier Sylt-Tinnum.md` → bereits verarbeitet (Log 2026-07-20 18:08, Prüfsumme `3f610cc44373`)\n- `2026-07-08 Internes Audit Hartmann Grevenbroich.md` → bereits verarbeitet (Log 2026-07-20 18:09, `3aba61006606`)\n- `202",
+      "last_stamp": "2026-08-14"
     },
     {
       "id": "td-handover",
@@ -29,10 +29,10 @@
       "paused": false,
       "allow_write": true,
       "created_at": "2026-08-08T23:03:05+02:00",
-      "last_run_at": "2026-08-13T18:45:24+02:00",
+      "last_run_at": "2026-08-14T19:01:04+02:00",
       "last_status": "ok",
-      "last_answer_preview": "Neu: —\nOffen: —\nKonflikt/Stale: —\n\nHandover: ruhig (2026-08-13)",
-      "last_stamp": "2026-08-13"
+      "last_answer_preview": "{\"tool\": \"ReadNote\", \"args\": {\"path\": \"HSEQ Sync/Vorlagen/Jobs/PROMPT-Handover.md\"}}",
+      "last_stamp": "2026-08-14"
     },
     {
       "id": "td-lernen",
@@ -46,10 +46,10 @@
       "paused": false,
       "allow_write": true,
       "created_at": "2026-08-08T23:03:05+02:00",
-      "last_run_at": "2026-08-09T10:36:11+02:00",
+      "last_run_at": "2026-08-14T20:29:41+02:00",
       "last_status": "ok",
-      "last_answer_preview": "Aus Fertig lernen: nichts Neues\n\nBegründung kurz: Ich habe die beiden letzten Fertig-UWS-Berichte verglichen (Senger 2026-07-15, Hartmann 2026-07-13). Es zeigt sich **kein wiederkehrendes Muster**: Senger ist fast durchgehend „Nein“, Hartmann fast durchgehend „Ja“ — die Abweichungen sind standortspezifisch, keine wiederkehrende Lücke, die eine Vorlagen-Zeile entlasten würde. Die UWS-Vorlage samt M",
-      "last_stamp": "2026-08-09"
+      "last_answer_preview": "Ich prüfe zuerst, ob im Fertig-Ordner neuere Berichte liegen als die beiden bereits geladenen (15.07 + 13.07).\n\n{\"tool\": \"ListVaultDir\", \"args\": {\"path\": \"HSEQ Sync/00 Arbeitsfluss/Fertig\", \"extensions\": [\".md\"]}}",
+      "last_stamp": "2026-08-14"
     },
     {
       "id": "td-memory",
@@ -62,10 +62,10 @@
       "paused": false,
       "allow_write": false,
       "created_at": "2026-08-09T11:33:15+02:00",
-      "last_run_at": "2026-08-13T03:00:45+02:00",
+      "last_run_at": "2026-08-15T09:28:22+02:00",
       "last_status": "ok",
-      "last_answer_preview": "Memory-Hygiene 2026-08-13\nDaily: neu (2026-08-13.md)\nMEMORY PII: 0 → clean",
-      "last_stamp": "2026-08-13",
+      "last_answer_preview": "Memory-Hygiene 2026-08-15\nDaily: neu (2026-08-15.md)\nMEMORY PII: 0 → clean",
+      "last_stamp": "2026-08-15",
       "script": "memory_hygiene.py"
     },
     {
@@ -79,10 +79,10 @@
       "paused": false,
       "allow_write": false,
       "created_at": "2026-08-09T11:33:15+02:00",
-      "last_run_at": "2026-08-13T06:00:58+02:00",
+      "last_run_at": "2026-08-15T09:28:29+02:00",
       "last_status": "ok",
-      "last_answer_preview": "Session-Cleanup 2026-08-13: exit=0\n{\"agentId\": \"main\", \"storePath\": \"/Users/lxndrhbrt/.openclaw/agents/main/sessions/sessions.json\", \"mode\": \"enforce\", \"dryRun\": false, \"beforeCount\": 18, \"afterCount\": 18, \"repaired\": 0, \"missing\": 0, \"dmScopeRetired\": 0, \"modelRunPruned\": 0, \"pruned\": 0, \"capped\": 0, \"unreferencedArtifacts\": {\"scannedFiles\": 259, \"removedFiles\": 1, \"freedBytes\": 7033, \"olderThanM",
-      "last_stamp": "2026-08-13",
+      "last_answer_preview": "Session-Cleanup 2026-08-15: exit=0\n{\"agentId\": \"main\", \"storePath\": \"/Users/lxndrhbrt/.openclaw/agents/main/sessions/sessions.json\", \"mode\": \"enforce\", \"dryRun\": false, \"beforeCount\": 18, \"afterCount\": 18, \"repaired\": 0, \"missing\": 0, \"dmScopeRetired\": 0, \"modelRunPruned\": 0, \"pruned\": 0, \"capped\": 0, \"unreferencedArtifacts\": {\"scannedFiles\": 243, \"removedFiles\": 0, \"freedBytes\": 0, \"olderThanMs\":",
+      "last_stamp": "2026-08-15",
       "script": "session_cleanup_legacy.py"
     }
   ],

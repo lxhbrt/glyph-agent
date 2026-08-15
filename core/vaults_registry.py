@@ -23,7 +23,7 @@ DEFAULTS_STORE = os.path.join(GLYPH_DIR, "vaults.defaults.json")
 OBSIDIAN_ROOT = os.path.expanduser("~/ObsidianVaults")
 
 EXTRA = ("pins",)
-FLAGS = dict(reorder=True, require_exists=False)
+FLAGS = dict(reorder=True, require_exists=False, home_head="agent")
 
 # Seed nur wenn vaults.json fehlt (bestehende Installation migrieren)
 _LEGACY_SEED = [
@@ -124,9 +124,12 @@ def load_store(*, force: bool = False) -> dict:
         store = _migrate_seed()
         return save_store(store)
 
-    return bind_store.load_store(
+    store = bind_store.load_store(
         USER_STORE, "vaults", extra_keys=EXTRA, force=force, **FLAGS
     )
+    if bind_store.apply_heads_schema(store, "vaults", home_head="agent"):
+        return save_store(store)
+    return store
 
 
 def _migrate_seed() -> dict:
@@ -137,7 +140,10 @@ def _migrate_seed() -> dict:
         if os.path.isdir(os.path.expanduser(raw["path"])):
             any_exist = True
         v = bind_store.normalize_item(
-            {**raw, "id": _slug(raw["name"]), "pins": []}, i, extra_keys=EXTRA
+            {**raw, "id": _slug(raw["name"]), "pins": []},
+            i,
+            extra_keys=EXTRA,
+            home_head="agent",
         )
         if v and v["exists"]:
             v["pins"] = _auto_pins_for_path(v["path"])
@@ -152,6 +158,8 @@ def save_store(data: dict) -> dict:
     extra_meta = {}
     if data.get("migrated_from"):
         extra_meta["migrated_from"] = data["migrated_from"]
+    if data.get("heads_schema"):
+        extra_meta["heads_schema"] = data["heads_schema"]
     out = bind_store.save_store(
         USER_STORE,
         data,
@@ -175,32 +183,88 @@ def get_vault(vid: str) -> Optional[dict]:
     return None
 
 
+def _agent_mode(item: dict, *, home_head: str) -> str:
+    return bind_store.head_mode(item, "agent", home_head=home_head)
+
+
 def paths_for_agent() -> List[str]:
-    """Enabled vaults, primary first. Private included (read)."""
+    """Enabled folders bound to °_Agent. Private included (read)."""
     out = []
+    seen = set()
     for v in list_vaults():
         if not v.get("enabled", True):
+            continue
+        if _agent_mode(v, home_head="agent") == "unbound":
             continue
         if not v.get("exists") and not os.path.isdir(v["path"]):
             continue
         out.append(v["path"])
+        seen.add(v["path"])
+    try:
+        from . import workspaces_registry as wr
+
+        for w in wr.list_workspaces(include_missing=False):
+            if not w.get("enabled", True):
+                continue
+            if _agent_mode(w, home_head="code") == "unbound":
+                continue
+            p = w["path"]
+            if p in seen:
+                continue
+            out.append(p)
+            seen.add(p)
+    except Exception:
+        pass
     return out
 
 
 def private_paths() -> List[str]:
-    return [
+    out = [
         v["path"]
         for v in list_vaults()
-        if v.get("enabled", True) and v.get("mode") == "private"
+        if v.get("enabled", True)
+        and _agent_mode(v, home_head="agent") == "private"
     ]
+    seen = set(out)
+    try:
+        from . import workspaces_registry as wr
+
+        for w in wr.list_workspaces(include_missing=False):
+            if not w.get("enabled", True):
+                continue
+            if _agent_mode(w, home_head="code") != "private":
+                continue
+            if w["path"] in seen:
+                continue
+            out.append(w["path"])
+            seen.add(w["path"])
+    except Exception:
+        pass
+    return out
 
 
 def writable_paths() -> List[str]:
-    return [
+    out = [
         v["path"]
         for v in list_vaults()
-        if v.get("enabled", True) and v.get("mode") == "rw"
+        if v.get("enabled", True) and _agent_mode(v, home_head="agent") == "rw"
     ]
+    seen = set(out)
+    try:
+        from . import workspaces_registry as wr
+
+        for w in wr.list_workspaces(include_missing=False):
+            if not w.get("enabled", True):
+                continue
+            if _agent_mode(w, home_head="code") != "rw":
+                continue
+            if w["path"] in seen:
+                continue
+            out.append(w["path"])
+            seen.add(w["path"])
+    except Exception:
+        pass
+    return out
 
 
 def is_private_path(abs_path: str) -> bool:
@@ -349,13 +413,21 @@ def ensure_default_mds(vault_path: str) -> List[str]:
     return created
 
 
-def attach(raw_input: str, mode: str = "r") -> dict:
+def attach(raw_input: str, mode: str = "r", head: Optional[str] = None) -> dict:
     parsed = parse_attach_input(raw_input)
     mode = bind_store.normalize_mode(mode or "r")
+    head_id = str(head or "").strip().lower() or None
+    if head_id and head_id not in bind_store.HEADS:
+        head_id = None
     store = load_store(force=True)
     path = parsed["path"]
     for v in store.get("vaults") or []:
         if os.path.realpath(v.get("path") or "") == path:
+            if head_id:
+                return {
+                    "vault": update_vault(v["id"], {"heads": {head_id: mode}}),
+                    "created_mds": [],
+                }
             raise ValueError("Vault bereits angebunden")
 
     created_mds = ensure_default_mds(path)
@@ -365,18 +437,27 @@ def attach(raw_input: str, mode: str = "r") -> dict:
         if not any(p["path"] == rel for p in pins):
             pins.append({"path": rel, "label": os.path.basename(rel), "source": "manual"})
 
+    home_mode = mode if (not head_id or head_id == "agent") else "unbound"
+    heads = bind_store.default_heads("agent", home_mode if home_mode != "unbound" else "r")
+    if home_mode == "unbound":
+        heads["agent"] = "unbound"
+    if head_id:
+        heads[head_id] = mode
+
     vault = bind_store.normalize_item(
         {
             "id": _slug(parsed["name"]) + "-" + uuid.uuid4().hex[:4],
             "name": parsed["name"],
             "path": path,
-            "mode": mode,
+            "mode": mode if home_mode != "unbound" else mode,
+            "heads": heads,
             "primary": len(store.get("vaults") or []) == 0,
             "pins": pins,
             "enabled": True,
         },
         len(store.get("vaults") or []),
         extra_keys=EXTRA,
+        home_head="agent",
     )
     if not vault:
         raise ValueError("Vault konnte nicht angelegt werden")

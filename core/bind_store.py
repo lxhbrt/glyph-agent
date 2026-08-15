@@ -13,6 +13,8 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 MODES = frozenset({"r", "rw", "private"})
+HEADS = ("grok", "agent", "code")
+HEAD_MODES = frozenset({"r", "rw", "private", "unbound"})
 
 # path → (mtime, runtime store)
 _mtime_cache: Dict[str, Tuple[float, Optional[dict]]] = {}
@@ -25,6 +27,77 @@ def normalize_mode(raw: str) -> str:
     if mode not in MODES:
         return "r"
     return mode
+
+
+def normalize_head_mode(raw: str, fallback: str = "unbound") -> str:
+    mode = str(raw or fallback).strip().lower()
+    if mode == "r+w":
+        mode = "rw"
+    if mode in ("off", "none", "cut", ""):
+        mode = "unbound"
+    if mode not in HEAD_MODES:
+        return fallback if fallback in HEAD_MODES else "unbound"
+    return mode
+
+
+def default_heads(home_head: str, mode: str) -> Dict[str, str]:
+    """Grok starts open (rw). Others: only the home head. Privat stays privat."""
+    home = home_head if home_head in HEADS else "agent"
+    m = normalize_mode(mode)
+    grok = "private" if m == "private" else "rw"
+    return {
+        "grok": grok if home != "grok" else m,
+        "agent": m if home == "agent" else "unbound",
+        "code": m if home == "code" else "unbound",
+    }
+
+
+def normalize_heads(raw, *, home_head: str, mode: str) -> Dict[str, str]:
+    base = default_heads(home_head, mode)
+    if not isinstance(raw, dict):
+        return base
+    out = dict(base)
+    for h in HEADS:
+        if h in raw:
+            out[h] = normalize_head_mode(raw[h], fallback=base[h])
+    return out
+
+
+def head_mode(item: Optional[dict], head: str, *, home_head: str = "agent") -> str:
+    if not isinstance(item, dict):
+        return "unbound"
+    heads = item.get("heads")
+    if isinstance(heads, dict) and head in heads:
+        return normalize_head_mode(heads.get(head), fallback="unbound")
+    if head == home_head:
+        return normalize_mode(item.get("mode") or "r")
+    if head == "grok":
+        return "private" if normalize_mode(item.get("mode") or "r") == "private" else "rw"
+    return "unbound"
+
+
+def upgrade_grok_open(items: List[dict], *, home_head: str) -> bool:
+    """Old default left grok unbound. Open it unless the folder is privat."""
+    changed = False
+    home = home_head if home_head in HEADS else "agent"
+    for it in items:
+        heads = dict(it.get("heads") or {})
+        if heads.get("grok") != "unbound":
+            continue
+        home_m = heads.get(home) or it.get("mode") or "r"
+        heads["grok"] = "private" if home_m == "private" else "rw"
+        it["heads"] = heads
+        changed = True
+    return changed
+
+
+def apply_heads_schema(store: dict, list_key: str, *, home_head: str) -> bool:
+    """Return True if the caller should persist (schema bump and/or grok open)."""
+    if int(store.get("heads_schema") or 1) >= 2:
+        return False
+    upgrade_grok_open(list(store.get(list_key) or []), home_head=home_head)
+    store["heads_schema"] = 2
+    return True
 
 
 def slug(name: str, fallback: str = "item") -> str:
@@ -41,7 +114,13 @@ def _safe_order(value, fallback: int) -> int:
         return int(fallback)
 
 
-def normalize_item(raw: dict, order: int, *, extra_keys: tuple = ()) -> Optional[dict]:
+def normalize_item(
+    raw: dict,
+    order: int,
+    *,
+    extra_keys: tuple = (),
+    home_head: str = "agent",
+) -> Optional[dict]:
     """Kernfelder + Extras; hängt immer live exists an (Runtime)."""
     if not isinstance(raw, dict):
         return None
@@ -55,11 +134,18 @@ def normalize_item(raw: dict, order: int, *, extra_keys: tuple = ()) -> Optional
         pass
     name = str(raw.get("name") or os.path.basename(path) or "Bind").strip()
     vid = str(raw.get("id") or "").strip() or slug(name)
+    home = home_head if home_head in HEADS else "agent"
+    mode = normalize_mode(raw.get("mode") or "r")
+    heads = normalize_heads(raw.get("heads"), home_head=home, mode=mode)
+    home_mode = heads.get(home)
+    if home_mode and home_mode != "unbound":
+        mode = home_mode
     item: Dict[str, Any] = {
         "id": vid,
         "name": name[:120],
         "path": path,
-        "mode": normalize_mode(raw.get("mode") or "r"),
+        "mode": mode,
+        "heads": heads,
         "primary": bool(raw.get("primary")),
         "enabled": raw.get("enabled", True) is not False,
         "order": _safe_order(raw.get("order", order), order),
@@ -71,13 +157,18 @@ def normalize_item(raw: dict, order: int, *, extra_keys: tuple = ()) -> Optional
     return item
 
 
-def to_disk(item: dict, *, extra_keys: tuple = ()) -> dict:
+def to_disk(item: dict, *, extra_keys: tuple = (), home_head: str = "agent") -> dict:
     """Disk-Record: kein exists, kein obsidian_uri."""
     out: Dict[str, Any] = {
         "id": item.get("id"),
         "name": item.get("name"),
         "path": item.get("path"),
         "mode": normalize_mode(item.get("mode") or "r"),
+        "heads": normalize_heads(
+            item.get("heads"),
+            home_head=home_head if home_head in HEADS else "agent",
+            mode=item.get("mode") or "r",
+        ),
         "primary": bool(item.get("primary")),
         "enabled": item.get("enabled", True) is not False,
         "order": _safe_order(item.get("order", 0), 0),
@@ -143,6 +234,7 @@ def load_store(
     reorder: bool,
     require_exists: bool,
     force: bool = False,
+    home_head: str = "agent",
 ) -> dict:
     """Cache-Hit → Runtime-Dict. File-Read → normalize + fix_primary."""
     if not os.path.isfile(user_store):
@@ -167,7 +259,9 @@ def load_store(
     items: List[dict] = []
     for i, raw in enumerate(data.get(list_key) or []):
         try:
-            item = normalize_item(raw, i, extra_keys=extra_keys)
+            item = normalize_item(
+                raw, i, extra_keys=extra_keys, home_head=home_head
+            )
         except Exception:
             continue
         if item:
@@ -188,13 +282,16 @@ def save_store(
     extra_meta: Optional[dict] = None,
     reorder: bool,
     require_exists: bool,
+    home_head: str = "agent",
 ) -> dict:
     """Schreibt Disk-Projektion; cached und returned Runtime (exists live)."""
     os.makedirs(os.path.dirname(os.path.abspath(user_store)) or ".", exist_ok=True)
     items: List[dict] = []
     for i, raw in enumerate(data.get(list_key) or []):
         try:
-            item = normalize_item(raw, i, extra_keys=extra_keys)
+            item = normalize_item(
+                raw, i, extra_keys=extra_keys, home_head=home_head
+            )
         except Exception:
             continue
         if item:
@@ -205,7 +302,9 @@ def save_store(
     runtime: Dict[str, Any] = {"version": 1, list_key: items, **meta}
     disk: Dict[str, Any] = {
         "version": 1,
-        list_key: [to_disk(it, extra_keys=extra_keys) for it in items],
+        list_key: [
+            to_disk(it, extra_keys=extra_keys, home_head=home_head) for it in items
+        ],
         **meta,
     }
 
@@ -231,8 +330,9 @@ def update_item(
     extra_keys: tuple = (),
     reorder: bool,
     require_exists: bool,
+    home_head: str = "agent",
 ) -> dict:
-    """Nur mode|enabled|name|primary|move. Unbekannte Keys (inkl. pins) ignorieren."""
+    """Nur mode|heads|enabled|name|primary|move. Unbekannte Keys (inkl. pins) ignorieren."""
     store = load_store(
         user_store,
         list_key,
@@ -240,6 +340,7 @@ def update_item(
         reorder=reorder,
         require_exists=require_exists,
         force=True,
+        home_head=home_head,
     )
     items = store.get(list_key) or []
     found = None
@@ -250,9 +351,23 @@ def update_item(
     if not found:
         raise _not_found(list_key)
 
+    home = home_head if home_head in HEADS else "agent"
     patch = patch or {}
     if "mode" in patch:
         found["mode"] = normalize_mode(patch["mode"])
+        merged = dict(found.get("heads") or {})
+        merged[home] = found["mode"]
+        found["heads"] = normalize_heads(
+            merged, home_head=home, mode=found["mode"]
+        )
+    if "heads" in patch and isinstance(patch["heads"], dict):
+        merged = {**(found.get("heads") or {}), **patch["heads"]}
+        found["heads"] = normalize_heads(
+            merged, home_head=home, mode=found.get("mode") or "r"
+        )
+        home_mode = found["heads"].get(home)
+        if home_mode and home_mode != "unbound":
+            found["mode"] = home_mode
     if "enabled" in patch:
         found["enabled"] = bool(patch["enabled"])
     if "name" in patch and str(patch["name"]).strip():
@@ -275,6 +390,7 @@ def update_item(
         extra_meta=_meta_from(store, list_key) or None,
         reorder=reorder,
         require_exists=require_exists,
+        home_head=home,
     )
     for it in saved.get(list_key) or []:
         if it.get("id") == vid:
@@ -290,6 +406,7 @@ def detach_item(
     extra_keys: tuple = (),
     reorder: bool,
     require_exists: bool,
+    home_head: str = "agent",
 ) -> bool:
     store = load_store(
         user_store,
@@ -298,6 +415,7 @@ def detach_item(
         reorder=reorder,
         require_exists=require_exists,
         force=True,
+        home_head=home_head,
     )
     before = len(store.get(list_key) or [])
     store[list_key] = [it for it in (store.get(list_key) or []) if it.get("id") != vid]
@@ -311,5 +429,6 @@ def detach_item(
         extra_meta=_meta_from(store, list_key) or None,
         reorder=reorder,
         require_exists=require_exists,
+        home_head=home_head,
     )
     return True

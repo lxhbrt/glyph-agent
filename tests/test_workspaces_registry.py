@@ -139,6 +139,24 @@ class WorkspacesRegistryTest(unittest.TestCase):
         self.assertEqual(wr.accessible_roots(), [])
         self.assertEqual(code_tools.workspace_roots(), [])
 
+    def test_heads_default_and_cross_bind(self):
+        wr = self.wr
+        a = wr.attach(self.ws_a, mode="rw")["workspace"]
+        self.assertEqual(a["heads"]["code"], "rw")
+        self.assertEqual(a["heads"]["agent"], "unbound")
+        self.assertEqual(a["heads"]["grok"], "rw")
+        self.assertIn(self.ws_a, wr.accessible_roots())
+
+        wr.update_workspace(a["id"], {"heads": {"code": "private", "agent": "r"}})
+        self.assertNotIn(self.ws_a, wr.accessible_roots())
+        from core import vaults_registry as vr
+
+        # agent sees the workspace when bound
+        self.assertIn(self.ws_a, vr.paths_for_agent())
+
+        wr.update_workspace(a["id"], {"heads": {"agent": "unbound", "code": "r"}})
+        self.assertIn(self.ws_a, wr.accessible_roots())
+
     def test_save_disk_has_no_exists_load_old_exists(self):
         wr = self.wr
         wr.attach(self.ws_a, mode="r")

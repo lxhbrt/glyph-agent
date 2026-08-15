@@ -162,6 +162,46 @@ class VaultsRegistryTest(unittest.TestCase):
         loaded = vr.load_store(force=True)
         self.assertEqual(loaded["vaults"][0]["order"], 0)
 
+    def test_heads_default_and_patch(self):
+        vr = self.vr
+        a = vr.attach(self.va, mode="r")["vault"]
+        self.assertEqual(a["heads"]["agent"], "r")
+        self.assertEqual(a["heads"]["grok"], "rw")
+        self.assertEqual(a["heads"]["code"], "unbound")
+
+        updated = vr.update_vault(a["id"], {"heads": {"code": "rw", "grok": "private"}})
+        self.assertEqual(updated["heads"]["agent"], "r")
+        self.assertEqual(updated["heads"]["code"], "rw")
+        self.assertEqual(updated["heads"]["grok"], "private")
+        self.assertEqual(updated["mode"], "r")
+        self.assertIn(self.va, vr.paths_for_agent())
+
+        unbound = vr.update_vault(a["id"], {"heads": {"agent": "unbound"}})
+        self.assertEqual(unbound["heads"]["agent"], "unbound")
+        self.assertNotIn(self.va, vr.paths_for_agent())
+
+        again = vr.attach(self.va, mode="private", head="agent")
+        self.assertEqual(again["vault"]["heads"]["agent"], "private")
+        self.assertIn(self.va, vr.private_paths())
+
+        priv = vr.attach(self.vb, mode="private")["vault"]
+        self.assertEqual(priv["heads"]["agent"], "private")
+        self.assertEqual(priv["heads"]["grok"], "private")
+
+    def test_heads_schema_opens_legacy_grok_unbound(self):
+        vr = self.vr
+        a = vr.attach(self.va, mode="r")["vault"]
+        store = vr.load_store(force=True)
+        store["heads_schema"] = 1
+        for v in store["vaults"]:
+            v["heads"]["grok"] = "unbound"
+        vr.save_store(store)
+        bind_store._mtime_cache.clear()
+        loaded = vr.load_store(force=True)
+        self.assertEqual(loaded["heads_schema"], 2)
+        item = next(v for v in loaded["vaults"] if v["id"] == a["id"])
+        self.assertEqual(item["heads"]["grok"], "rw")
+
     def test_empty_roots_do_not_wipe_index(self):
         from core import retrieval
 

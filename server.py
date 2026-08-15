@@ -25,15 +25,15 @@ die Tool-Orchestrierung nutzen kann, ohne die Agentenlogik selbst zu tragen.
   GET  /health -> {"status": "ok", "provider": "...", "model": "..."}
 
   GET    /vaults              Kabelsalat-Snapshot (~/.glyph/vaults.json)
-  POST   /vaults              Anbinden {input, mode?}
-  PATCH  /vaults/<id>         mode|primary|move|enabled|name|pins
+  POST   /vaults              Anbinden {input, mode?, head?}
+  PATCH  /vaults/<id>         mode|heads|primary|move|enabled|name|pins
   DELETE /vaults/<id>         Lösen
   POST   /vaults/<id>/pins    {path, label?}
   DELETE /vaults/<id>/pins    body {path}
 
   GET    /workspaces          Kabelsalat-Snapshot (~/.glyph/workspaces.json) — ^_Code
-  POST   /workspaces          Anbinden {input|path, mode?}
-  PATCH  /workspaces/<id>     mode|primary|move|enabled|name
+  POST   /workspaces          Anbinden {input|path, mode?, head?}
+  PATCH  /workspaces/<id>     mode|heads|primary|move|enabled|name
   DELETE /workspaces/<id>     Lösen
 
 Läuft standardmäßig auf 127.0.0.1:PORT (nur lokal). Keine externen Abhängigkeiten.
@@ -673,7 +673,8 @@ def main():
                         or ""
                     )
                     mode = str((payload or {}).get("mode") or "r")
-                    res = agent_vaults.attach(raw_in, mode=mode)
+                    head = str((payload or {}).get("head") or "").strip() or None
+                    res = agent_vaults.attach(raw_in, mode=mode, head=head)
                     self._send(200, {"ok": True, **res})
                 except ValueError as e:
                     self._send(400, {"ok": False, "error": str(e)})
@@ -712,7 +713,8 @@ def main():
                         or ""
                     )
                     mode = str((payload or {}).get("mode") or "r")
-                    res = agent_workspaces.attach(raw_in, mode=mode)
+                    head = str((payload or {}).get("head") or "").strip() or None
+                    res = agent_workspaces.attach(raw_in, mode=mode, head=head)
                     self._send(200, {"ok": True, **res})
                 except ValueError as e:
                     self._send(400, {"ok": False, "error": str(e)})

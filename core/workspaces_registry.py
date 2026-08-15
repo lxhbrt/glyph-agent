@@ -20,7 +20,7 @@ GLYPH_DIR = os.path.expanduser("~/.glyph")
 USER_STORE = os.path.join(GLYPH_DIR, "workspaces.json")
 
 EXTRA = ()
-FLAGS = dict(reorder=False, require_exists=True)
+FLAGS = dict(reorder=False, require_exists=True, home_head="code")
 
 _HOME = os.path.expanduser("~")
 _SEED = [
@@ -55,7 +55,7 @@ def _slug(name: str) -> str:
 def _seed_store() -> dict:
     workspaces = []
     for i, raw in enumerate(_SEED):
-        w = bind_store.normalize_item({**raw}, i)
+        w = bind_store.normalize_item({**raw}, i, home_head="code")
         if w and w["exists"]:
             workspaces.append(w)
     # Fallback: CODE_WORKSPACE_ROOTS / defaults from config if seed empty
@@ -71,6 +71,7 @@ def _seed_store() -> dict:
                         "primary": i == 0,
                     },
                     i,
+                    home_head="code",
                 )
                 if w and w["exists"]:
                     workspaces.append(w)
@@ -88,15 +89,20 @@ def load_store(*, force: bool = False) -> dict:
         store = _seed_store()
         return save_store(store)
 
-    return bind_store.load_store(
+    store = bind_store.load_store(
         USER_STORE, "workspaces", extra_keys=EXTRA, force=force, **FLAGS
     )
+    if bind_store.apply_heads_schema(store, "workspaces", home_head="code"):
+        return save_store(store)
+    return store
 
 
 def save_store(data: dict) -> dict:
     extra_meta = {}
     if data.get("seeded"):
         extra_meta["seeded"] = True
+    if data.get("heads_schema"):
+        extra_meta["heads_schema"] = data["heads_schema"]
     out = bind_store.save_store(
         USER_STORE,
         data,
@@ -117,26 +123,51 @@ def list_workspaces(*, include_missing: bool = True) -> List[dict]:
     return items
 
 
+def _code_mode(item: dict, *, home_head: str) -> str:
+    return bind_store.head_mode(item, "code", home_head=home_head)
+
+
 def accessible_roots() -> List[str]:
-    """Roots für Lesen: enabled, exists, mode != private."""
+    """Roots für Lesen: enabled, exists, an ^_Code gebunden, nicht privat."""
     roots = []
     seen = set()
     for w in list_workspaces(include_missing=False):
         if not w.get("enabled"):
             continue
-        if w.get("mode") == "private":
+        if _code_mode(w, home_head="code") not in ("r", "rw"):
             continue
         p = w["path"]
         if p in seen:
             continue
         seen.add(p)
         roots.append(p)
+    try:
+        from . import vaults_registry as vr
+
+        for v in vr.list_vaults():
+            if not v.get("enabled", True):
+                continue
+            if _code_mode(v, home_head="agent") not in ("r", "rw"):
+                continue
+            if not v.get("exists") and not os.path.isdir(v["path"]):
+                continue
+            p = v["path"]
+            if p in seen:
+                continue
+            seen.add(p)
+            roots.append(p)
+    except Exception:
+        pass
     return roots
 
 
 def primary_root() -> Optional[str]:
     for w in list_workspaces(include_missing=False):
-        if w.get("enabled") and w.get("mode") != "private" and w.get("primary"):
+        if (
+            w.get("enabled")
+            and _code_mode(w, home_head="code") in ("r", "rw")
+            and w.get("primary")
+        ):
             return w["path"]
     roots = accessible_roots()
     return roots[0] if roots else None
@@ -153,7 +184,19 @@ def mode_for_root(root: str) -> Optional[str]:
         if not w.get("enabled"):
             continue
         if w.get("path") == real:
-            return w.get("mode") or "r"
+            m = _code_mode(w, home_head="code")
+            return None if m == "unbound" else m
+    try:
+        from . import vaults_registry as vr
+
+        for v in vr.list_vaults():
+            if not v.get("enabled", True):
+                continue
+            if v.get("path") == real:
+                m = _code_mode(v, home_head="agent")
+                return None if m == "unbound" else m
+    except Exception:
+        pass
     return None
 
 
@@ -173,8 +216,25 @@ def mode_for_path(path: str) -> Optional[str]:
         root = w["path"]
         if cand == root or cand.startswith(root + os.sep):
             if len(root) > best_len:
-                best = w.get("mode") or "r"
-                best_len = len(root)
+                m = _code_mode(w, home_head="code")
+                if m != "unbound":
+                    best = m
+                    best_len = len(root)
+    try:
+        from . import vaults_registry as vr
+
+        for v in vr.list_vaults():
+            if not v.get("enabled", True):
+                continue
+            root = v["path"]
+            if cand == root or cand.startswith(root + os.sep):
+                if len(root) > best_len:
+                    m = _code_mode(v, home_head="agent")
+                    if m != "unbound":
+                        best = m
+                        best_len = len(root)
+    except Exception:
+        pass
     return best
 
 
@@ -229,9 +289,12 @@ def parse_attach_input(raw: str) -> dict:
     return {"path": path, "name": name}
 
 
-def attach(raw_input: str, mode: str = "r") -> dict:
+def attach(raw_input: str, mode: str = "r", head: Optional[str] = None) -> dict:
     parsed = parse_attach_input(raw_input)
     mode = bind_store.normalize_mode(mode or "r")
+    head_id = str(head or "").strip().lower() or None
+    if head_id and head_id not in bind_store.HEADS:
+        head_id = None
     store = load_store(force=True)
     path = parsed["path"]
     for w in store.get("workspaces") or []:
@@ -240,7 +303,22 @@ def attach(raw_input: str, mode: str = "r") -> dict:
         except OSError:
             existing = w.get("path") or ""
         if existing == path:
+            if head_id:
+                return {
+                    "workspace": update_workspace(
+                        w["id"], {"heads": {head_id: mode}}
+                    )
+                }
             raise ValueError("Workspace bereits angebunden")
+
+    home_mode = mode if (not head_id or head_id == "code") else "unbound"
+    heads = bind_store.default_heads(
+        "code", home_mode if home_mode != "unbound" else "r"
+    )
+    if home_mode == "unbound":
+        heads["code"] = "unbound"
+    if head_id:
+        heads[head_id] = mode
 
     ws = bind_store.normalize_item(
         {
@@ -248,10 +326,12 @@ def attach(raw_input: str, mode: str = "r") -> dict:
             "name": parsed["name"],
             "path": path,
             "mode": mode,
+            "heads": heads,
             "primary": len(store.get("workspaces") or []) == 0,
             "enabled": True,
         },
         len(store.get("workspaces") or []),
+        home_head="code",
     )
     if not ws:
         raise ValueError("Workspace konnte nicht angelegt werden")

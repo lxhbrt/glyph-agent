@@ -16,7 +16,7 @@ Lokale Engine hinter dem Glyph-Profil **glyph-agent**: Vault-Gedächtnis, Recher
 | **Agent-Loop** | B+: VaultFind → Tools → Cloud-Denker | `core/tool_loop.py`, `core/agent.py` | retrieval, research, vault_tools |
 | **Code-Loop** | ^_Code: Read/Write/Grep/Shell, Confirm/Elevated | `core/code_loop.py`, `core/code_tools.py` | `workspaces_registry` |
 | **Tools-Registry** | Tool-Namen, Schemas, Dispatch | `core/tool_registry.py` | tool_loop / code_loop |
-| **Bind-Store** | Persistenz + Kern-PATCH für Vaults+Workspaces | `core/bind_store.py` | vaults_registry, workspaces_registry |
+| **Bind-Store** | Persistenz + Kern-PATCH für Vaults+Workspaces; `heads` je Kopf (grok/agent/code) | `core/bind_store.py` | vaults_registry, workspaces_registry |
 | **Vaults** | `~/.glyph/vaults.json`, Pins, Privat-Block | `core/vaults_registry.py` | Index, VaultFind |
 | **Workspaces** | `~/.glyph/workspaces.json` r/r+w/🔒 | `core/workspaces_registry.py` | code_tools Pfadchecks |
 | **Retrieval** | Embeddings `bge-m3` + Keyword hybrid | `core/retrieval.py` | Ollama lokal |
