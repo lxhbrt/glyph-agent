@@ -108,11 +108,30 @@ def _resolve_path(path):
                     best_len = len(root)
         return best if best else (None, None)
 
-    # Relativ: Primary zuerst
+    # Relativ: Root-Name (Basename) direkt auflösen, sonst Primary zuerst,
+    # dann übrige Roots (projektrelativer Pfad kann in jedem Root liegen).
+    # 1) Basename eines bekannten Roots → Root selbst (z. B. "glyph-ui" → /…/glyph-ui)
     for root in roots:
+        if os.path.basename(root.rstrip("/")) == raw:
+            return root, root
+    # 2) Zugehörigkeit: erst Primary, dann übrige Roots — für Schreib-Tools
+    #    (neue Dateien existieren noch nicht, nur die Zugehörigkeit zählt).
+    ordered = roots
+    primary = _ordered_roots()
+    if primary and primary[0] in ordered:
+        ordered = [primary[0]] + [r for r in ordered if r != primary[0]]
+    first_zip = None
+    for root in ordered:
         cand = os.path.realpath(os.path.join(root, raw))
         if cand == root or cand.startswith(root + os.sep):
-            return cand, root
+            if first_zip is None:
+                first_zip = (cand, root)
+            # Existierender Treffer gewinnt (Lese-Fall: Datei liegt real dort)
+            if os.path.exists(cand):
+                return cand, root
+    # 3) Kein existierender Treffer, aber Zugehörigkeit gefunden → zurück
+    if first_zip is not None:
+        return first_zip
     return None, None
 
 
