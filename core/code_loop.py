@@ -545,11 +545,19 @@ def _auto_confirm(_tool_name, _args):
     return True
 
 
-def _hard_fail_answer(tool_name, result):
+def _hard_fail_answer(tool_name, result, args=None):
     err = (result or {}).get("error") or "unbekannter Fehler"
+    extra = ""
+    # Bei abgelehnten Shell-Befehlen den konkreten Befehl sichtbar machen,
+    # damit der Abbruch nachvollziehbar ist statt stumm zu scheitern.
+    if tool_name == "RunCommand" and isinstance(args, dict):
+        cmd = args.get("command") or args.get("cmd") or ""
+        cwd = args.get("cwd") or "."
+        if cmd:
+            extra = f"\n\nAbgelehnter Befehl:\n```\n{cmd}\n```\nin: `{cwd}`"
     return (
         f"**Abbruch:** `{tool_name}` fehlgeschlagen.\n\n"
-        f"{err}\n\n"
+        f"{err}{extra}\n\n"
         "Kette gestoppt — bitte korrigieren und erneut senden."
     )
 
@@ -939,7 +947,7 @@ def _loop(
             log.log("code_tool", tool=tool_name, rounds=rounds, ok=False, denied=True)
             # Write/Shell-Deny: hard stop; Read-Tools: Modell darf korrigieren
             if _is_write_tool(tool_name):
-                answer = _hard_fail_answer(tool_name, result)
+                answer = _hard_fail_answer(tool_name, result, args)
                 _emit({"type": "answer", "status": "content", "text": answer})
                 return {
                     "ok": False,
