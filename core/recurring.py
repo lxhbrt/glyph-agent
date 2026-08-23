@@ -166,6 +166,7 @@ _SCRIPT_ALLOW = frozenset(
     {
         "memory_hygiene.py",
         "session_cleanup_legacy.py",
+        "wiki_hygiene.py",
     }
 )
 
@@ -225,10 +226,13 @@ def _normalize_item(raw: dict) -> Optional[dict]:
         "allow_write": bool(raw.get("allow_write")),
         "created_at": str(raw.get("created_at") or _iso()),
         "last_run_at": raw.get("last_run_at"),
-        "last_status": raw.get("last_status"),  # ok | error | skipped
+        "last_status": raw.get("last_status"),  # ok | error | skipped | empty
         "last_answer_preview": raw.get("last_answer_preview"),
         "last_stamp": raw.get("last_stamp"),  # YYYY-MM-DD or YYYY-MM-DD-HH:MM due key
     }
+    finish = str(raw.get("pass") or "").strip()[:400]
+    if finish:
+        out["pass"] = finish
     if script:
         out["script"] = os.path.basename(script)
     return out
@@ -382,14 +386,46 @@ def is_due(item: dict, now: Optional[datetime] = None) -> bool:
     return item.get("last_stamp") != stamp
 
 
-def _set_run_result(item_id: str, ok: bool, answer: str, stamp: Optional[str]) -> None:
+def _first_line_leer(answer: str) -> bool:
+    lines = (answer or "").strip().splitlines()
+    if not lines:
+        return False
+    head = lines[0].strip().upper()
+    return head == "LEER" or head.startswith("LEER ") or head.startswith("LEER:")
+
+
+def classify_run_status(ok: bool, answer: str, has_pass: bool) -> str:
+    """ok | empty | error. LEER nur wenn ein Fertig-Kriterium gesetzt ist."""
+    if not ok:
+        return "error"
+    if has_pass:
+        if _first_line_leer(answer):
+            return "empty"
+        if not (answer or "").strip():
+            return "error"
+    return "ok"
+
+
+def message_for_run(item: dict, now: Optional[datetime] = None) -> str:
+    day = (now or _now()).strftime("%Y-%m-%d")
+    message = (item.get("prompt") or "").replace("YYYY-MM-DD", day)
+    finish = str(item.get("pass") or "").strip()
+    if not finish:
+        return message
+    return (
+        f"{message}\n\nFertig nur wenn: {finish}\n"
+        "Keine neue Arbeit: erste Zeile genau LEER."
+    )
+
+
+def _set_run_result(item_id: str, status: str, answer: str, stamp: Optional[str]) -> None:
     preview = (answer or "")[:400]
     with _lock:
         store = load_store()
         for i, raw in enumerate(store.get("items") or []):
             if str(raw.get("id")) == item_id:
                 raw["last_run_at"] = _iso()
-                raw["last_status"] = "ok" if ok else "error"
+                raw["last_status"] = status
                 raw["last_answer_preview"] = preview
                 if stamp:
                     raw["last_stamp"] = stamp
@@ -454,19 +490,18 @@ def run_item(item_id: str, force: bool = False) -> dict:
         if script_path:
             result = _run_script_job(script_path, timeout_s=600)
         else:
-            message = (item.get("prompt") or "").replace(
-                "YYYY-MM-DD", _now().strftime("%Y-%m-%d")
-            )
             result = tool_loop.run(
-                message,
+                message_for_run(item),
                 confirm=make_confirm(bool(item.get("allow_write"))),
                 max_rounds=24,
             )
-        ok = bool(result.get("ok", True))
+        tool_ok = bool(result.get("ok", True))
         answer = result.get("answer") or ""
-        # Scheduled: Stamp nur bei ok (Retry am selben Tag). force: Stamp immer.
+        status = classify_run_status(tool_ok, answer, bool(item.get("pass")))
+        ok = status != "error"
+        # Scheduled: Stamp bei ok/empty (Retry am selben Tag nur bei Fehler). force: Stamp immer.
         use_stamp = stamp if (ok or force) else None
-        _set_run_result(item_id, ok, answer, use_stamp)
+        _set_run_result(item_id, status, answer, use_stamp)
 
         duration_ms = int((time.time() - t0) * 1000)
         out = {
@@ -477,7 +512,7 @@ def run_item(item_id: str, force: bool = False) -> dict:
             "duration_ms": duration_ms,
             "answer": answer,
             "rounds": result.get("rounds", 0),
-            "last_status": "ok" if ok else "error",
+            "last_status": status,
             "script": script_name or None,
         }
         _append_event(
@@ -494,7 +529,7 @@ def run_item(item_id: str, force: bool = False) -> dict:
         log.log("recurring_run_done", id=item_id, ok=ok, duration_ms=duration_ms)
         return out
     except Exception as e:
-        _set_run_result(item_id, False, str(e), stamp if force else None)
+        _set_run_result(item_id, "error", str(e), stamp if force else None)
         _append_event(
             {
                 "type": "run",
