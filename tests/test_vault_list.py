@@ -142,13 +142,81 @@ class ListQuestionRoutingTests(unittest.TestCase):
         )
 
 
+class MatchVaultNameTests(unittest.TestCase):
+    """Ordner-/Dateiname auf Disk, unabhängig vom Embedding-Index."""
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory(prefix="glyph-name-match-")
+        self.hseq = os.path.join(self.td.name, "HSEQ Sync")
+        self.asi = os.path.join(self.td.name, "ASI, BS. UWS, QM, EM")
+        os.makedirs(os.path.join(self.hseq, "Arbeitssicherheit"))
+        os.makedirs(os.path.join(self.asi, "Arbeitssicherheit", "Information"))
+        wiki = os.path.join(self.td.name, "memory-wiki")
+        sources = os.path.join(wiki, "sources")
+        os.makedirs(sources)
+        with open(
+            os.path.join(self.hseq, "Arbeitssicherheit", "Allgemeine Information.md"),
+            "w",
+            encoding="utf-8",
+        ) as f:
+            f.write("![[hinweis.msg]]\n")
+        with open(
+            os.path.join(sources, "unsafe-local-arbeitssicherheit-abc.md"),
+            "w",
+            encoding="utf-8",
+        ) as f:
+            f.write("# Kopie Arbeitssicherheit\n")
+        self.old_paths = list(config.VAULT_PATHS)
+        self.old_path = config.VAULT_PATH
+        config.VAULT_PATHS = [self.asi, self.hseq, wiki]
+        config.VAULT_PATH = self.asi
+
+    def tearDown(self):
+        config.VAULT_PATHS = self.old_paths
+        config.VAULT_PATH = self.old_path
+        self.td.cleanup()
+
+    def test_match_both_arbeitssicherheit_folders(self):
+        hits = vault_tools.match_vault_entries("Arbeitssicherheit")
+        folders = [h["path"] for h in hits if h.get("kind") == "folder"]
+        self.assertIn("/HSEQ Sync/Arbeitssicherheit", folders, hits)
+        self.assertIn("/ASI, BS. UWS, QM, EM/Arbeitssicherheit", folders, hits)
+
+    def test_match_allgemeine_information_file(self):
+        hits = vault_tools.match_vault_entries("Allgemeine Information")
+        files = [h["path"] for h in hits if h.get("kind") == "file"]
+        self.assertIn(
+            "/HSEQ Sync/Arbeitssicherheit/Allgemeine Information.md",
+            files,
+            hits,
+        )
+
+    def test_match_typo_one_s(self):
+        hits = vault_tools.match_vault_entries("arbeitsicherheit")
+        folders = [h["path"] for h in hits if h.get("kind") == "folder"]
+        self.assertIn("/HSEQ Sync/Arbeitssicherheit", folders, hits)
+
+    def test_infer_list_paths_named_folder(self):
+        paths = tool_loop._infer_vault_list_paths("was liegt im Ordner Arbeitssicherheit")
+        self.assertIn("/HSEQ Sync/Arbeitssicherheit", paths, paths)
+        self.assertNotIn(".", paths)
+
+    def test_match_skips_wiki_sources(self):
+        hits = vault_tools.match_vault_entries("Arbeitssicherheit")
+        paths = [h["path"] for h in hits]
+        self.assertFalse(
+            any("sources" in (p or "").lower() or "unsafe-local" in (p or "").lower() for p in paths),
+            paths,
+        )
+
+
 class RankingPrefersLiveOverArchive(unittest.TestCase):
     """Primär-Vault / Arbeitsfluss vor Wiki-sources/unsafe-local-Hash-Kopien."""
 
     def test_live_beats_unsafe_local_slug(self):
         with tempfile.TemporaryDirectory(prefix="glyph-rank-") as td:
             hseq = os.path.join(td, "HSEQ Sync")
-            wiki = os.path.join(td, "OpenClaw memory-wiki")
+            wiki = os.path.join(td, "memory-wiki")
             eingang = os.path.join(hseq, "00 Arbeitsfluss", "Eingang")
             sources = os.path.join(wiki, "sources")
             os.makedirs(eingang)
@@ -182,6 +250,69 @@ class RankingPrefersLiveOverArchive(unittest.TestCase):
             finally:
                 config.VAULT_PATHS = old
                 config.VAULT_PATH = old[0] if old else hseq
+
+
+class IndexSlashPathResolve(unittest.TestCase):
+    """VaultFind-Index liefert '/HSEQ Sync/…' — ListVaultDir/ReadNote müssen das akzeptieren."""
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory(prefix="glyph-index-slash-")
+        self.hseq = os.path.join(self.td.name, "HSEQ Sync")
+        themen = os.path.join(self.hseq, "Themen")
+        os.makedirs(themen)
+        with open(os.path.join(themen, "PSA.md"), "w", encoding="utf-8") as f:
+            f.write("# PSA\nPflicht im Produktionsbereich.\n")
+        self.old_paths = list(config.VAULT_PATHS)
+        self.old_path = config.VAULT_PATH
+        config.VAULT_PATHS = [self.hseq]
+        config.VAULT_PATH = self.hseq
+
+    def tearDown(self):
+        config.VAULT_PATHS = self.old_paths
+        config.VAULT_PATH = self.old_path
+        self.td.cleanup()
+
+    def test_resolve_leading_slash_vault_prefix(self):
+        want = os.path.realpath(os.path.join(self.hseq, "Themen"))
+        self.assertEqual(
+            vault_tools._resolve_vault_path("/HSEQ Sync/Themen"),
+            want,
+        )
+        self.assertEqual(
+            vault_tools._resolve_vault_path("HSEQ Sync/Themen"),
+            want,
+        )
+
+    def test_list_vault_dir_index_slash(self):
+        res = vault_tools.list_vault_dir("/HSEQ Sync/Themen")
+        self.assertEqual(res["status"], "success", res)
+        names = {e["name"] for e in res["entries"]}
+        self.assertIn("PSA.md", names)
+        self.assertNotIn("außerhalb", (res.get("error") or "").lower())
+
+    def test_read_note_index_slash(self):
+        note = vault_tools.read_note("/HSEQ Sync/Themen/PSA.md")
+        self.assertIn("Produktionsbereich", note["content"])
+
+    def test_outside_abs_still_denied(self):
+        res = vault_tools.list_vault_dir("/tmp")
+        self.assertEqual(res["status"], "error")
+        self.assertIn("außerhalb", res["error"])
+        self.assertIn("HSEQ Sync", res["error"])
+
+    def test_error_names_bound_vaults_not_unbound(self):
+        res = vault_tools.list_vault_dir("/gibt-es-nicht")
+        self.assertEqual(res["status"], "error")
+        self.assertIn("angebunden: HSEQ Sync", res["error"])
+        self.assertNotIn("nicht als Vault angebunden", res["error"])
+
+    def test_role_line_lists_bound_vault(self):
+        line = tool_loop._bound_vaults_role_line()
+        self.assertIn("HSEQ Sync", line)
+        self.assertIn("Angebundene Vaults", line)
+        self.assertIn("/Name/Ordner", line)
+        bound = line.split("Pfad", 1)[0]
+        self.assertNotIn("Privat", bound)
 
 
 class VaultPrefixPathResolve(unittest.TestCase):

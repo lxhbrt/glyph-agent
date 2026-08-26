@@ -92,6 +92,8 @@ def _resolve_vault_path(relative_or_abs):
       - absolut unter einem Vault-Root
       - relativ zum Vault-Root: "Vorlagen/Jobs/x.md"
       - mit Vault-Präfix (wie ListVaultDir/Treffer): "HSEQ Sync/Vorlagen/Jobs/x.md"
+      - Index-Pfad mit führendem Slash: "/HSEQ Sync/Themen/PSA.md"
+        (VaultFind speichert so — das ist kein Dateisystem-Root /HSEQ Sync)
     """
     vault_roots = [
         os.path.realpath(v)
@@ -108,7 +110,15 @@ def _resolve_vault_path(relative_or_abs):
         for v in vault_roots:
             if cand == v or cand.startswith(v + os.sep):
                 return cand
-        return None
+        # "/HSEQ Sync/Themen" ist isabs, liegt aber nicht unter /HSEQ Sync auf Disk.
+        # Nur wenn das erste Segment ein angebundener Vault-Name ist.
+        stripped = raw.replace("\\", "/").lstrip("/")
+        first = stripped.split("/", 1)[0] if stripped else ""
+        names = {os.path.basename(v) for v in vault_roots}
+        if first and first in names:
+            raw = stripped
+        else:
+            return None
 
     # "HSEQ Sync/…"-Präfix → im passenden Vault-Root auflösen (erster Match)
     norm = raw.replace("\\", "/").lstrip("./")
@@ -132,6 +142,37 @@ def _resolve_vault_path(relative_or_abs):
             if os.path.exists(cand):
                 return cand
     return first_under
+
+
+def _bound_vault_names():
+    """Basenames der aktuell angebundenen Vault-Roots (für Fehlermeldungen)."""
+    names = []
+    seen = set()
+    for v in getattr(config, "VAULT_PATHS", [config.VAULT_PATH]):
+        if not v:
+            continue
+        try:
+            n = os.path.basename(os.path.realpath(v))
+        except OSError:
+            n = os.path.basename(str(v).rstrip("/"))
+        if n and n not in seen:
+            seen.add(n)
+            names.append(n)
+    return names
+
+
+def _outside_vault_error(raw):
+    """Fehlertext, der angebundene Vaults nennt — sonst hält das Modell sie für ungebunden."""
+    names = _bound_vault_names()
+    if names:
+        return (
+            f"Pfad außerhalb der Vaults oder ungültig: {raw} "
+            f"(angebunden: {', '.join(names)})"
+        )
+    return (
+        f"Pfad außerhalb der Vaults oder ungültig: {raw} "
+        f"(keine Vaults angebunden — Buch → Tab Vaults)"
+    )
 
 
 def _root_for_path(abs_path):
@@ -245,7 +286,7 @@ def _is_archive_source_path(rel_path):
     kanonischen Arbeitsdateien (z. B. HSEQ Sync Eingang/Fertig).
     """
     p = (rel_path or "").replace("\\", "/").lower().lstrip("/")
-    if p.startswith("sources/") or "/sources/" in f"/{p}":
+    if p == "sources" or p.startswith("sources/") or "/sources/" in f"/{p}/":
         return True
     if "unsafe-local" in p:
         return True
@@ -270,7 +311,7 @@ def path_source_rank(rel_path, vault_name=None, query=None):
     Zusätzlicher Score für kanonische Arbeitsdateien vs. Archiv-Kopien.
 
     Ziel: Nutzer trifft gültige Live-Dateien (HSEQ Sync, Arbeitsfluss), nicht
-    alte Wiki-Source-Nummern/Hash-Slugs aus OpenClaw memory-wiki/sources/.
+    alte Wiki-Source-Nummern/Hash-Slugs aus memory-wiki/sources/.
     Positiv = bevorzugen, negativ = abwerten.
     """
     rel = (rel_path or "").replace("\\", "/").lstrip("/")
@@ -291,6 +332,250 @@ def path_source_rank(rel_path, vault_name=None, query=None):
         if "fertig" in q and "fertig" in rel_l:
             bonus += 12
     return bonus
+
+
+def canon_vault_path(path):
+    """Einheitlicher Trefferpfad: /VaultName/rel — ohne doppelte Schrägstriche."""
+    p = str(path or "").replace("\\", "/").strip()
+    if not p or p in (".", "/"):
+        return p if p == "." else "/"
+    if not p.startswith("/"):
+        p = "/" + p
+    while "//" in p:
+        p = p.replace("//", "/")
+    if len(p) > 1:
+        p = p.rstrip("/")
+    return p
+
+
+def _fold_name(s):
+    """Klein, ß→ss, Umlaute, nur [a-z0-9], plus Form ohne Doppelbuchstaben."""
+    t = (s or "").lower().replace("ß", "ss")
+    for a, b in (("ä", "ae"), ("ö", "oe"), ("ü", "ue")):
+        t = t.replace(a, b)
+    t = re.sub(r"[^a-z0-9]+", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    compact = t.replace(" ", "")
+    dedup = re.sub(r"(.)\1+", r"\1", compact)
+    return t, compact, dedup
+
+
+def _edit_distance(a, b, limit=2):
+    if a == b:
+        return 0
+    la, lb = len(a), len(b)
+    if abs(la - lb) > limit:
+        return limit + 1
+    if la > lb:
+        a, b, la, lb = b, a, lb, la
+    prev = list(range(lb + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        row_min = i
+        for j, cb in enumerate(b, 1):
+            val = min(cur[j - 1] + 1, prev[j] + 1, prev[j - 1] + (ca != cb))
+            cur.append(val)
+            if val < row_min:
+                row_min = val
+        if row_min > limit:
+            return limit + 1
+        prev = cur
+    return prev[-1]
+
+
+def name_match_score(query, name):
+    """
+    Score 0–100: heißt der Ordner/die Datei so wie die Frage?
+    Unabhängig vom Embedding-Index; Tippfehler ss/s (Arbeitssicherheit).
+    """
+    n_sp, n_c, n_d = _fold_name(name)
+    if not n_c:
+        return 0
+    _q_sp, q_c, q_d = _fold_name(query)
+    tokens = [t for t in _tokenize_query(query) if len(t) >= 3]
+    if q_c and (q_c == n_c or q_d == n_d):
+        return 100
+    if n_c and q_c and len(n_c) >= 6 and (n_c in q_c or (len(q_c) >= 6 and q_c in n_c)):
+        return 90
+    if n_d and q_d and len(n_d) >= 6 and (n_d in q_d or q_d in n_d):
+        return 88
+    if tokens:
+        ok = True
+        for t in tokens:
+            _, t_c, _t_d = _fold_name(t)
+            if not t_c or (t_c not in n_c and t not in n_sp):
+                ok = False
+                break
+        if ok:
+            return 80
+    if len(n_d) >= 8 and len(q_d) >= 8 and _edit_distance(q_d, n_d, 2) <= 2:
+        return 75
+    best = 0
+    for t in tokens:
+        _, t_c, t_d = _fold_name(t)
+        if not t_c:
+            continue
+        if t_c == n_c or t_d == n_d:
+            best = max(best, 85)
+        elif len(t_d) >= 8 and len(n_d) >= 8 and _edit_distance(t_d, n_d, 2) <= 2:
+            best = max(best, 78)
+        elif len(t_c) >= 6 and t_c in n_c:
+            best = max(best, 60)
+    return best
+
+
+def _query_vault_hints(query):
+    """Vault-Namen, die in der Frage vorkommen (auch Stopwort 'sync' in 'HSEQ Sync')."""
+    _sp, q_c, _d = _fold_name(query)
+    if not q_c:
+        return []
+    hints = []
+    for v in getattr(config, "VAULT_PATHS", []) or []:
+        name = os.path.basename(os.path.realpath(v) if v else "")
+        if not name:
+            continue
+        _nsp, n_c, _nd = _fold_name(name)
+        if n_c and n_c in q_c:
+            hints.append(name)
+    return hints
+
+
+def match_vault_entries(query, limit=16, min_score=70):
+    """
+    Ordner und .md-Dateien, deren *Name* zur Frage passt (Disk, kein Index).
+
+    Liefert Liste {kind, path, title, score, vault} — path kanonisch /Vault/rel.
+    Private Vaults ausgelassen. Versteckte/.obsidian/backups/Blocklist wie search_vault.
+    """
+    q = (query or "").strip()
+    if not q:
+        return []
+    vault_roots = [v for v in getattr(config, "VAULT_PATHS", [config.VAULT_PATH]) if v]
+    try:
+        from . import vaults_registry as _vr
+
+        _priv = {os.path.realpath(p) for p in _vr.private_paths()}
+    except Exception:
+        _priv = set()
+    hints = set(_query_vault_hints(q))
+    folders = []
+    files = []
+    seen_f = set()
+    seen_d = set()
+
+    def _add_folder(vault_name, rel, score, name):
+        path = canon_vault_path(f"{vault_name}/{rel}" if rel else vault_name)
+        if path in seen_d:
+            if score > 0:
+                for row in folders:
+                    if row["path"] == path:
+                        row["score"] = max(row["score"], score)
+                        break
+            return
+        seen_d.add(path)
+        if hints and vault_name in hints:
+            score += 8
+        folders.append({
+            "kind": "folder",
+            "path": path,
+            "title": name,
+            "score": score,
+            "vault": vault_name,
+        })
+
+    def _add_file(vault_name, rel, score, name):
+        path = canon_vault_path(f"{vault_name}/{rel}")
+        if path in seen_f:
+            return
+        seen_f.add(path)
+        if hints and vault_name in hints:
+            score += 8
+        files.append({
+            "kind": "file",
+            "path": path,
+            "title": name,
+            "score": score,
+            "vault": vault_name,
+            "excerpt": "",
+        })
+
+    for vroot in vault_roots:
+        vroot_r = os.path.realpath(vroot)
+        if vroot_r in _priv:
+            continue
+        if not os.path.isdir(vroot_r):
+            continue
+        vault_name = os.path.basename(vroot_r)
+        vscore = name_match_score(q, vault_name)
+        if vscore >= 90:
+            _add_folder(vault_name, "", vscore, vault_name)
+        for dirpath, dirnames, filenames in os.walk(vroot_r):
+            relroot = os.path.relpath(dirpath, vroot_r)
+            segs = [] if relroot in (".", "") else relroot.split(os.sep)
+            if segs and any(s.startswith(".") for s in segs):
+                dirnames[:] = []
+                continue
+            if segs and "backups" in [s.lower() for s in segs]:
+                dirnames[:] = []
+                continue
+            if segs:
+                try:
+                    if _is_blocked(relroot) or _is_archive_source_path(relroot):
+                        dirnames[:] = []
+                        continue
+                except Exception:
+                    pass
+            dirnames[:] = [
+                d for d in dirnames
+                if not d.startswith(".") and d.lower() != "backups"
+            ]
+            if segs:
+                dname = segs[-1]
+                sc = name_match_score(q, dname)
+                if sc >= min_score:
+                    _add_folder(vault_name, relroot.replace("\\", "/"), sc, dname)
+                    if sc >= 85:
+                        for fn in filenames:
+                            if not fn.endswith(".md") or fn.startswith("."):
+                                continue
+                            child_rel = os.path.join(relroot, fn).replace("\\", "/")
+                            try:
+                                if _is_blocked(child_rel) or _is_archive_source_path(child_rel):
+                                    continue
+                            except Exception:
+                                pass
+                            _add_file(vault_name, child_rel, max(sc - 10, min_score), fn)
+            for fn in filenames:
+                if not fn.endswith(".md") or fn.startswith("."):
+                    continue
+                stem, _ext = os.path.splitext(fn)
+                sc = max(name_match_score(q, stem), name_match_score(q, fn))
+                if sc < min_score:
+                    continue
+                rel = fn if relroot in (".", "") else os.path.join(relroot, fn)
+                rel = rel.replace("\\", "/")
+                try:
+                    if _is_blocked(rel) or _is_archive_source_path(rel):
+                        continue
+                except Exception:
+                    pass
+                _add_file(vault_name, rel, sc, fn)
+                parent = "" if relroot in (".", "") else relroot.replace("\\", "/")
+                if parent:
+                    _add_folder(
+                        vault_name,
+                        parent,
+                        max(sc - 5, min_score),
+                        os.path.basename(parent),
+                    )
+
+    folders.sort(key=lambda r: (-r["score"], r["path"]))
+    files.sort(key=lambda r: (-r["score"], r["path"]))
+    # Ordner zuerst, dann Dateien — Limit teilen, Ordner nicht komplett verdrängen
+    max_folders = min(6, limit)
+    out = folders[:max_folders] + files[: max(0, limit - min(len(folders), max_folders))]
+    log.log("match_vault_entries", query=q[:80], n=len(out), folders=len(folders), files=len(files))
+    return out[:limit]
 
 
 def search_vault(query, limit=20):
@@ -469,7 +754,7 @@ def list_vault_dir(path="", limit=200, extensions=None):
             "entries": [],
             "count": 0,
             "truncated": False,
-            "error": f"Pfad außerhalb der Vaults oder ungültig: {raw}",
+            "error": _outside_vault_error(raw),
         }
     rel = _rel_to_root(resolved)
     if _is_blocked(rel):
@@ -721,13 +1006,13 @@ def list_backups():
     return out
 
 
-# --- OpenClaw Wiki-Status (agent-digest, read-only) ---------------------------
+# --- Wiki-Status (agent-digest, read-only) ------------------------------------
 
 def _wiki_digest_path():
-    """Pfad zu agent-digest.json unter OpenClaw memory-wiki, oder None."""
+    """Pfad zu agent-digest.json unter memory-wiki, oder None."""
     vault_roots = getattr(config, "VAULT_PATHS", [config.VAULT_PATH])
     for v in vault_roots:
-        # Konvention: OpenClaw memory-wiki/.openclaw-wiki/cache/agent-digest.json
+        # Konvention: memory-wiki/.openclaw-wiki/cache/agent-digest.json
         cand = os.path.join(
             v, ".openclaw-wiki", "cache", "agent-digest.json"
         )
@@ -744,7 +1029,7 @@ def _wiki_digest_path():
     # Fallback: bekannter Default-Pfad
     home = os.path.expanduser("~")
     fallback = os.path.join(
-        home, "ObsidianVaults", "OpenClaw memory-wiki",
+        home, "ObsidianVaults", "memory-wiki",
         ".openclaw-wiki", "cache", "agent-digest.json",
     )
     if os.path.isfile(fallback):
@@ -754,7 +1039,7 @@ def _wiki_digest_path():
 
 def wiki_status():
     """
-    Read-only Stats aus OpenClaw agent-digest.json.
+    Read-only Stats aus agent-digest.json (memory-wiki).
     Liefert pageCounts, claimCount, claimHealth (gekürzt), page_sample_n.
     """
     path = _wiki_digest_path()
@@ -765,7 +1050,7 @@ def wiki_status():
             "available": False,
             "error": (
                 "agent-digest.json nicht gefunden "
-                "(erwartet unter OpenClaw memory-wiki/.openclaw-wiki/cache/)."
+                "(erwartet unter memory-wiki/.openclaw-wiki/cache/)."
             ),
         }
     try:

@@ -390,6 +390,53 @@ def _handle_chat(payload, send=None):
     return result
 
 
+
+def _normalize_vault_selected(raw, limit=12):
+    """Gewählte Ordner-Suche-Treffer aus der UI — klein und pfadbegrenzt."""
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for item in raw[:limit]:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "").strip()
+        if not path or len(path) > 500:
+            continue
+        raw_kind = str(item.get("kind") or "")
+        if raw_kind == "web" or path.startswith("http://") or path.startswith("https://"):
+            kind = "web"
+        elif raw_kind == "folder":
+            kind = "folder"
+        else:
+            kind = "file"
+        excerpt = str(item.get("excerpt") or item.get("text") or "")[:800]
+        source = str(item.get("source") or "")[:40]
+        if kind == "web" and not source:
+            source = "dguv" if "dguv.de" in path.lower() else "komnet"
+        out.append({
+            "id": str(item.get("id") or f"{kind}:{path}")[:200],
+            "kind": kind,
+            "path": path,
+            "title": str(item.get("title") or path.rsplit("/", 1)[-1])[:200],
+            "excerpt": excerpt,
+            "score": item.get("score"),
+            "source": source,
+        })
+    return out
+
+
+def _handle_vault_find(payload):
+    """POST /vault/find — Trefferliste für den UI-Toggle, kein LLM."""
+    from core import vault_preview
+
+    query = str((payload or {}).get("query") or (payload or {}).get("message") or "").strip()
+    try:
+        top_k = int((payload or {}).get("top_k") or 8)
+    except (TypeError, ValueError):
+        top_k = 8
+    return vault_preview.preview_vault_hits(query, top_k=top_k)
+
+
 def _handle_health():
     from core import runtime_models
 
@@ -820,6 +867,22 @@ def main():
                 except Exception as e:
                     self._send(500, {"error": str(e), "ok": False, "job": job_id})
                 return
+            if path in ("/vault/find", "/vault/find/"):
+                payload, err = _read_json_body(self)
+                if err:
+                    self._send(400, {"error": err, "ok": False})
+                    return
+                try:
+                    result = _handle_vault_find(payload)
+                    self._send(200, result)
+                except BrokenPipeError:
+                    return
+                except Exception as e:
+                    try:
+                        self._send(500, {"ok": False, "error": str(e), "hits": []})
+                    except BrokenPipeError:
+                        return
+                return
             if path == "/chat" or path.startswith("/chat"):
                 payload, err = _read_json_body(self)
                 if err:
@@ -895,7 +958,7 @@ def main():
         f"  Timeout: CHAT={getattr(config, 'CHAT_TIMEOUT', 60)}s "
         f"CODE={getattr(config, 'CODE_CHAT_TIMEOUT', 60)}s · threaded"
     )
-    print("  POST /chat  |  GET /health  |  GET|POST /models  |  POST /models/probe")
+    print("  POST /chat  |  POST /vault/find  |  GET /health  |  GET|POST /models  |  POST /models/probe")
     print("  GET|POST /recurring  |  POST /recurring/<id>/run|pause  |  POST /recurring/run-due")
     try:
         agent_recurring.ensure_migrated()

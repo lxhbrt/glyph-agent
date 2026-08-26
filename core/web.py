@@ -7,9 +7,9 @@ Webdienst (Exa, TinyFish). NIEMALS private Vault-Inhalte oder ungefilterte
 Dokumente in die Suchanfrage einbetten. Der Aufrufer (Tool-Loop) bestätigt
 die Anfrage, bevor sie rausgeht.
 
-Zwei unabhängige Quellen (redundant, kein Single-Point-of-Failure):
-  - Exa      -> EXA_API_KEY      (Klassische Websuche)
-  - TinyFish -> TINYFISH_API_KEY (Suche + URL-Extraktion/Fetch als Zweitquelle)
+Zwei unabhängige Quellen — Suche default parallel (source=both):
+  - Exa      -> EXA_API_KEY
+  - TinyFish -> TINYFISH_API_KEY (Suche + Extract/Fetch)
 
 Keys werden aus der Umgebung gelesen (core/dotenv.py lädt glyph-agent/.env) —
 nicht fest im Code.
@@ -20,6 +20,7 @@ import socket
 import time
 import urllib.request
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # --- Exa --------------------------------------------------------------------
 EXA_ENDPOINT = os.environ.get("EXA_ENDPOINT", "https://api.exa.ai/search")
@@ -34,7 +35,7 @@ def _exa_api_key():
     return key
 
 
-def search_exa(query, count=5, start_published_date=None):
+def search_exa(query, count=5, start_published_date=None, include_domains=None):
     """
     Führt eine Exa-Suche durch. query darf nur anonymisierte/öffentliche
     Suchbegriffe enthalten. Liefert Liste von {title, url, snippet}.
@@ -47,6 +48,9 @@ def search_exa(query, count=5, start_published_date=None):
         "contents": {"text": True, "highlights": True},
         "highlight": {"num_sentences": 2},
     }
+    domains = _domain_list(include_domains)
+    if domains:
+        payload["includeDomains"] = domains
     if start_published_date:
         payload["startPublishedDate"] = start_published_date
     req = urllib.request.Request(
@@ -92,12 +96,15 @@ def _tinyfish_api_key():
     return key
 
 
-def search_tinyfish(query, count=5, location="DE", language="de"):
+def search_tinyfish(query, count=5, location="DE", language="de", include_domains=None):
     """
-    Websuche über TinyFish (Zweitquelle). Liefert Liste von {title, url, snippet}.
+    Websuche über TinyFish. Liefert Liste von {title, url, snippet}.
     """
     q = urllib.parse.quote(query)
     url = f"{TINYFISH_SEARCH}?query={q}&location={location}&language={language}"
+    domains = _domain_list(include_domains)
+    if domains:
+        url += "&include_domains=" + urllib.parse.quote(",".join(domains))
     req = urllib.request.Request(url, headers={"X-API-Key": _tinyfish_api_key()})
     with urllib.request.urlopen(req, timeout=20) as resp:
         data = json.loads(resp.read().decode("utf-8"))
@@ -205,11 +212,89 @@ def browse_url(url, goal=None, timeout=None):
 
 
 # --- Dispatch (für Tool-Registry) ------------------------------------------
-def web_search(query, count=5, source="exa"):
+def web_search(query, count=5, source="both", include_domains=None):
     """
-    Kontrollierte Websuche. source: "exa" (Standard) | "tinyfish".
+    Kontrollierte Websuche. Default: Exa und TinyFish parallel, URLs mergen.
+    source: "both" (Standard) | "exa" | "tinyfish".
     query darf nur anonymisierte Suchbegriffe enthalten.
     """
-    if source == "tinyfish":
-        return search_tinyfish(query, count=count)
-    return search_exa(query, count=count)
+    src = (source or "both").strip().lower()
+    if src == "tinyfish":
+        return search_tinyfish(query, count=count, include_domains=include_domains)
+    if src == "exa":
+        return search_exa(query, count=count, include_domains=include_domains)
+    return _search_both(query, count=count, include_domains=include_domains)
+
+
+def _search_both(query, count=5, include_domains=None):
+    """Exa + TinyFish gleichzeitig. Ein Ausfall lässt die andere Quelle stehen."""
+    buckets = {"exa": [], "tinyfish": []}
+
+    def _run(name):
+        if name == "exa":
+            return search_exa(query, count=count, include_domains=include_domains)
+        return search_tinyfish(query, count=count, include_domains=include_domains)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futs = {pool.submit(_run, name): name for name in ("exa", "tinyfish")}
+        for fut in as_completed(futs):
+            name = futs[fut]
+            try:
+                buckets[name] = fut.result() or []
+            except Exception:
+                buckets[name] = []
+    return _merge_search_rows(buckets["exa"], buckets["tinyfish"], count)
+
+
+def _merge_search_rows(exa_rows, tinyfish_rows, count=5):
+    seen = set()
+    out = []
+    for row in list(exa_rows or []) + list(tinyfish_rows or []):
+        if not isinstance(row, dict):
+            continue
+        url = _norm_url(row.get("url"))
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        item = dict(row)
+        item["url"] = url
+        out.append(item)
+        if len(out) >= count:
+            break
+    return out
+
+
+def _norm_url(url):
+    raw = str(url or "").strip()
+    if not raw:
+        return ""
+    try:
+        p = urllib.parse.urlparse(raw)
+    except Exception:
+        return raw
+    if not p.scheme or not p.netloc:
+        return raw
+    host = p.netloc.lower()
+    path = p.path.rstrip("/") or ""
+    query = ("?" + p.query) if p.query else ""
+    return f"{p.scheme.lower()}://{host}{path}{query}"
+
+
+def _domain_list(include_domains):
+    if not include_domains:
+        return []
+    if isinstance(include_domains, str):
+        parts = include_domains.split(",")
+    else:
+        parts = list(include_domains)
+    out = []
+    seen = set()
+    for p in parts:
+        d = str(p or "").strip().lower()
+        if d.startswith("www."):
+            d = d[4:]
+        if not d or d in seen:
+            continue
+        seen.add(d)
+        out.append(d)
+    return out
