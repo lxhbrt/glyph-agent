@@ -12,16 +12,19 @@ Lokale Engine hinter dem Glyph-Profil **glyph-agent**: Vault-Gedächtnis, Recher
 
 | Node | Tut | Quellen | Hängt an / produziert |
 |------|-----|---------|------------------------|
-| **HTTP** | `/chat`, `/health`, vaults/workspaces/recurring CRUD | `server.py` | alle Loops |
-| **Agent-Loop** | B+: VaultFind → Tools → Cloud-Denker | `core/tool_loop.py`, `core/agent.py` | retrieval, research, vault_tools |
-| **Code-Loop** | ^_Code: Read/Write/Grep/Shell, Confirm/Elevated | `core/code_loop.py`, `core/code_tools.py` | `workspaces_registry` |
+| **HTTP** | `/chat`, `/health`, `/vault/find`, vaults/workspaces/recurring/tasks CRUD | `server.py` | alle Loops |
+| **Agent-Loop** | B+: VaultFind → Tools → Cloud-Denker. UI-Toggle: `vault_search` / `vault_selected` | `core/tool_loop.py`, `core/agent.py`, `core/vault_preview.py` | retrieval, research, vault_tools |
+| **Vault-Schreiben** | Chat-Wachstum: CreateNote/ApplyEdit unter Themen/ + Wiki. Chat nie löschen/leeren. Job `td-wiki-hygiene` darf doppelt tote Wiki-Dateien in den 30-Tage-Korb. | `core/vault_write_policy.py`, `core/vault_tools.py`, `scripts/wiki_hygiene.py` | tool_loop, jobs |
+| **Code-Loop** | ^_Code: Read/Write/Grep/Shell; Freigabe Einmal/Auftrag/Task | `core/code_loop.py`, `core/code_tools.py` | `workspaces_registry`, Grant-Store |
 | **Tools-Registry** | Tool-Namen, Schemas, Dispatch | `core/tool_registry.py` | tool_loop / code_loop |
 | **Bind-Store** | Persistenz + Kern-PATCH für Vaults+Workspaces; `heads` je Kopf (grok/agent/code) | `core/bind_store.py` | vaults_registry, workspaces_registry |
 | **Vaults** | `~/.glyph/vaults.json`, Pins, Privat-Block | `core/vaults_registry.py` | Index, VaultFind |
 | **Workspaces** | `~/.glyph/workspaces.json` r/r+w/🔒 | `core/workspaces_registry.py` | code_tools Pfadchecks |
 | **Retrieval** | Embeddings `bge-m3` + Keyword hybrid | `core/retrieval.py` | Ollama lokal |
 | **Research** | Exa grob, TinyFish fein | `core/research.py`, `core/web.py` | tool_loop |
-| **Recurring/Jobs** | Plan, Catch-up, HSEQ-Seeds | `core/recurring.py`, `jobs/`, `scripts/` | `jobs/recurring.json` |
+| **Swarm** | Composer-Aktion: Planer → Websuche → Synthese. Einstieg `POST /chat` mit `swarm: true` (`run_swarm`). Köpfe °_Agent / ^_Code. | `core/swarm.py` | HTTP `/chat`, Glyph-Composer |
+| **Recurring/Jobs** | Plan, Catch-up, HSEQ-Seeds, Nightly-Scripts (`memory_hygiene.py`, `wiki_hygiene.py`, `session_cleanup_legacy.py`) | `core/recurring.py`, `jobs/`, `scripts/` | `jobs/recurring.json` |
+| **Aufgaben** | Manuelle Übergabe zwischen Köpfen. SoT `~/.glyph/tasks.json`. Zielkopf optional, nie die ganze Session. | `core/tasks.py` | HTTP `/tasks`, Glyph Plan-Tab |
 | **LLM/Provider** | Direct Pro/Flash → OpenRouter 0731 | `core/llm.py`, `core/providers/` | config, Bindings |
 | **Config** | Env, Models, Ports | `core/config.py`, `core/dotenv.py` | alles |
 | **Verfassung** | B+-Regeln, Tabus | `CONSTITUTION.md` + **diese** CONTEXT | `~/.glyph/AGENTS.md`, MEMORY |
@@ -29,13 +32,17 @@ Lokale Engine hinter dem Glyph-Profil **glyph-agent**: Vault-Gedächtnis, Recher
 **Zwei Kontexte:** UI-Begriffe → `~/glyph-ui/CONTEXT.md`. Engine hier. Nicht vermischen.
 
 **Crux:**  
-- Write flüssig nur unter Workspace **`r+w`**; Elevated = `pending_confirmation` + `resume_token` (UI-Popup).  
+- Workspace-Recht `r+w` = beschreibbar, nicht Auto-Write. Apply braucht **Freigabe** (Einmal / Auftrag / Task) plus Grant-Store. Elevated und hart-deny gelten weiter.  
 - °_Agent default **kein Shell**. Shell nur `MODE=code`.  
 - Embeddings **nur** lokal `bge-m3` — nie Cloud-Embedding.
 
 ## Language
 
 **Nutzerantworten:** stop-slop (immer) — Kern zuerst, kein AI-Slop, keine erfundenen Normen.
+
+**Fortschreiben**:
+°_Agent legt an und ergänzt Notizen unter HSEQ `Themen/` und Wiki `concepts|entities|syntheses` (neue Source unter `sources/`). Chat: kein Löschen, kein Leeren, kein Umschreiben von Eingang oder Sources. Chat ohne Freigabe-Dialog auf diesen Pfaden. Wiki-Hygiene-Job: nur memory-wiki, doppelt tot → `_hygiene-trash/` (30 Tage).
+_Avoid_: Vault-Delete aus dem Chat; Auto-Write auf Vorlagen/Fertig/Hauptarchiv; Freigabe-Popup für Themen-Wachstum; Hygiene auf HSEQ/Privat
 
 **Cloud-Antwort**:
 Die vom Cloud-Denker formulierte Nutzerantwort im B+-Pfad (nach VaultFind/Web/Tools). In UI und Nutzer-Doku so nennen.
@@ -49,18 +56,49 @@ _Avoid_: OpenRouter als Synonym für diese Rolle in UI-Texten
 Ein nach außen sichtbares Finde-Werkzeug; intern hybrid Embedding + Keyword über erlaubte Vaults.
 _Avoid_: VaultRecall, VaultSearch (Aliase, kein neuer Begriff)
 
+**Ordner-Suche**:
+Manueller Vault-Zugriff aus der UI (°_Agent-Toggle). `POST /vault/find` liefert Treffer ohne LLM. `/chat` mit `vault_search=false` überspringt Precheck und blockt VaultFind/ListVaultDir. `vault_selected` injiziert nur die gewählten Treffer. Ohne diese Felder bleibt B+ (Jobs). Vault leer: KomNet einmal (Exa+TinyFish, Domain komnet.nrw.de), sonst DGUV (dguv.de) — nur `/vault/find`, nicht B+-Precheck.
+_Avoid_: Vault-Suche bei jeder interaktiven °_Agent-Nachricht; HTML-Scrape der Zielseite; offene Websuche als Ordner-Suche-Fallback
+
 **OpenRouter (Technik)**:
 Config- und Provider-Name der Cloud-API (`AGENT_PRIMARY_PROVIDER`, CONSTITUTION, Logs). **Kein** Glyph-UI-Profil, **keine** Nutzer-Sprache in der UI.
 _Avoid_: OpenRouter-Profil (entfernt)
 
 **B+**:
 Aktuelle Architektur: lokal Gedächtnis/Suche, Web nur bei Bedarf, Cloud-Denker formuliert, Antwort + Trace.
-_Avoid_: „3-Stufen-Fallback“ / lokaler Chat-Fallback (existiert nicht mehr; Direct Pro → OpenRouter Flash)
+_Avoid_: „3-Stufen-Fallback“ / lokaler Chat-Fallback (existiert nicht mehr; Direct Vision-Exp → OpenRouter Flash)
+
+**Workspace-Recht**:
+Capability eines angebundenen Code-Roots: ungebunden / `r` / `r+w` / `private`. SoT `~/.glyph/workspaces.json`. `r+w` erlaubt Lesen und macht Apply möglich — Apply selbst braucht eine **Freigabe**. Kein allgemeines `w` im Kabelsalat.
+_Avoid_: r+w = WriteFile allow; Recht als Shell-/Netz-Berechtigung; `w` als Standard-Mode
+
+**Freigabe**:
+Zeitlich begrenzte Erlaubnis für Apply. Stufen: **Einmal**, **Auftrag**, **Task**. Nie Session-weit, nie immer. Regex-Whitelist ist untere Grenze, nicht die Berechtigung.
+_Avoid_: Session-Always; auto-allow unter r+w; Whitelist = Permission
+
+**Auftrag**:
+Eine Nutzeranweisung bzw. ein Änderungssatz. Grant stirbt mit Abschluss, Abbruch, Fehler oder Zeitlimit. Nicht Recurring.
+_Avoid_: Job (SoT = Recurring); Session
+
+**Task**:
+Benannte Arbeit, nicht die Chat-Session. Grant: `task_id`, Workspace-Root, Pfadpräfixe, Aktionsklassen, Ablauf, Widerruf. Nur explizit schließen (oder Workspace-Wechsel, Widerruf, 2h Inaktivität). Neuer Prompt startet keinen Task. Aktion außerhalb Scope → Grant greift nicht + Hinweis.
+_Avoid_: Session-Grant; Chat als Scope; Prompt-Themenklassifikation; mit **Aufgabe** (Übergabe) verwechseln
+
+**Aufgabe**:
+Manuell übergebene Arbeit zwischen Köpfen. Speichert nur gewählte Belege (Meldung, Antwort, kompakter Trace, Anhang-Pfade) in `~/.glyph/tasks.json`. Zielkopf optional — Default leer, später zuweisen. Status `analysis` ist ein Workflow-Stand, kein Kopf. Neu braucht `pass` (Fertig-Kriterium). Status `done` nur mit `artifact`.
+_Avoid_: ganze Session übertragen; Vault-Inhalt mitkopieren; Analyse als Kopf; Recurring-To-do; automatischer Kopfwechsel; Fertig ohne Artefakt
+
+**Änderungssatz**:
+Gesammelte Dateiänderungen, ein Gesamt-Diff, atomarer Apply nach Freigabe. Danach Tests; Fail → kein Commit.
+_Avoid_: Datei-für-Datei Apply nach Sammel-Review; Auto-Commit
+
+**Aktionsklasse**:
+`file_change` · `test` · `git_commit` · `network` · Paketinstall · Deploy/Remote. Ein Grant für `client/src/**` deckt nicht `server/`. `git commit` immer explizit; `npm install`/`npx` immer explizit; Netzwerk mit Zielhost; push/deploy immer einzeln.
+_Avoid_: git commit in der Whitelist als stilles Allow
 
 ## Settled decisions (Direct-Hop 2026-08-12)
 
-- °_Agent: Direct `deepseek-v4-pro` → OpenRouter `deepseek/deepseek-v4-flash-0731`.
-- ^_Code: Direct `deepseek-v4-flash` → derselbe OpenRouter-0731.
+- °_Agent und ^_Code: Direct `deepseek-v4-flash-vision-exp` (Text + Bilder) → OpenRouter `deepseek/deepseek-v4-flash-0731`. Kein Gemini-Default, kein Auto-Hop nur bei Screenshot.
 - Key: `DIRECT_API_KEY` (Alias `DEEPSEEK_API_KEY`) + `DIRECT_API_URL` (Default `https://api.deepseek.com`). OpenAI-kompatibel, nicht DeepSeek-exklusiv.
 - Thinking = API-Default. Chat `EXTERNAL_MAX_CHARS=8000`. Kein Tiny/Free.
 
@@ -68,37 +106,66 @@ _Avoid_: „3-Stufen-Fallback“ / lokaler Chat-Fallback (existiert nicht mehr; 
 
 - UI-Sprache: **glyph-agent / Cloud-Antwort**; **OpenRouter** nur in Config/CONSTITUTION/Technik.
 - Domain-Doku: eigenes `CONTEXT.md` hier (Engine); Glyph-UI hat eigenes CONTEXT — zwei Kontexte.
-- Live-Test „grün“: Antwort + Steps **und** VaultFind erkennbar (Q8=B).
+- Live-Test „grün“: Antwort + Steps **und** VaultFind erkennbar (Q8=B) — gilt für Jobs/B+ ohne UI-Toggle; interaktives °_Agent seit 2026-08-15 nur bei Ordner-Suche-Toggle.
+
+### Settled decisions (Ordner-Suche 2026-08-15)
+
+- Interaktives °_Agent: keine automatische Vault-/Ordner-Suche. Toggle in der UI.
+- ACP-Adapter setzt immer `vault_search` (false außer Toggle an). Fehlt `_meta` → aus, nicht B+.
+- `vault_search=false` → kein VaultFind/ListVaultDir-Precheck, Tools gesperrt.
+- `vault_selected` → nur gewählte Treffer als Kontext, kein neuer VaultFind. `kind: web` = KomNet/DGUV-URL, kein ListVaultDir. Datei-Tap und Ordner-Pick: ReadPdf der 1–2 namenspassenden PDFs im selben Turn (nicht Listenplatz). Nie den Nutzer fragen, welche Datei zu öffnen.
+- `/vault/find` ohne Vault-Treffer: Exa+TinyFish auf `komnet.nrw.de`; leer → dieselben auf `dguv.de`. Kein HTML-Scrape. Nicht Jobs/B+.
+- WebSearch (Tool + Precheck + Swarm): Default `source=both` — Exa und TinyFish parallel, URLs mergen. ExtractUrl/FetchUrl bleibt TinyFish für konkrete Seiten.
+- `/chat` ohne Flag: B+ unverändert (HSEQ-Jobs, Scripts).
 - Kein ADR nötig — CONTEXT reicht (Q9=C).
 
 ## Settled decisions (C′ 2026-08-07)
 
 - **glyph-agent Default** bleibt **Vault-only** (kein Shell, kein allgemeines Repo-Schreiben).
-- **`MODE=code`** (per Request `mode: "code"`): ^_Code-Pfad — Tools `ListDir` / `ReadFile` / `Grep` / `SearchReplace` / `WriteFile` / `RunCommand`, Denker `CODE_OPENROUTER_MODEL` (Default `deepseek/deepseek-v4-flash-0731`).
+- **`MODE=code`** (per Request `mode: "code"`): ^_Code-Pfad — Tools `ListDir` / `ReadFile` / `Grep` / `SearchReplace` / `WriteFile` / `RunCommand`, Denker `CODE_OPENROUTER_MODEL` (Default `deepseek-v4-flash-vision-exp`).
 - **Workspaces-SoT:** `~/.glyph/workspaces.json` (Modes `r` / `rw` / `private`); Registry `core/workspaces_registry.py`. Fallback `CODE_WORKSPACE_ROOTS` nur wenn Store fehlt oder `CODE_WORKSPACES_USE_REGISTRY=false`; geladene leere/disabled Registry ist `[]`.
-- Write/SearchReplace unter **`r+w` ohne Popup**. Whitelist-Shell unter `r+w` ohne Popup.
-- **Elevated** braucht Glyph-Popup (`pending_confirmation` + `resume_token`): `git push|pull|fetch`, Compound, `npm run service:*`. Kein Session-Always für elevated.
+- Write/SearchReplace unter **`r+w` ohne Popup**. Whitelist-Shell unter `r+w` ohne Popup. **Aufgehoben 2026-08-22** (Freigabe Einmal/Auftrag/Task).
+- **Elevated** braucht Glyph-Popup (`pending_confirmation` + `resume_token`): `git push|pull|fetch`, Compound, `npm run service:*`. Kein Session-Always für elevated. **Erweitert 2026-08-22:** kein Session-Always für Schreiben/Shell überhaupt.
 - Fail nach Allow / unter r+w: **hard_error** + Banner (echter Grund). Hart-Deny: `rm`/`sudo`/… bleibt tot.
 - Shell: Whitelist + Hard-Deny + Elevated-Klassifikation + Timeout; nur angebundene Roots.
 
 ## Settled decisions (Wiederkehrende To-dos 2026-08-08)
 
 - **SoT:** `jobs/recurring.json` + `core/recurring.py`. UI: Glyph Kalender → Tab **Plan**.
-- Schema: title, prompt, schedule daily|weekly (Europe/Berlin), paused, allow_write, last_*.
+- Schema: title, prompt, schedule daily|weekly (Europe/Berlin), paused, allow_write, optional `pass`, last_* (`ok` · `error` · `empty`).
+- `pass` gesetzt: Prompt bekommt „Fertig nur wenn“; erste Zeile `LEER` → `last_status=empty` (Stamp ja, kein Fertig-Löschen). Ohne `pass` unverändert (HSEQ-Seeds).
 - Ausführen: Freitext → tool_loop; allow_write → Auto-Confirm nur HSEQ-Pfade. Globaler Job-Lock.
 - Scheduler: `POST /recurring/run-due` via `jobs-catchup.sh` (15 Min). **Zusätzlich einmal beim Agent-Start** (Hintergrund-Thread, ~2s Delay; Catch-up-Plist kann vor dem Agent laufen). Keine Plist pro To-do.
 - Migration: 3 HSEQ-Seeds (`td-eingang` 18:00, `td-handover` 18:30, `td-lernen` Fr 19:00).
 - Fertig: last_status=ok → UI „Fertig“ klickbar löscht To-do. Events → Systemzeile in Glyph-UI.
 - ACP-Plan-Leiste bleibt getrennt (Session).
 
+## Settled decisions (Aufgaben-Übergabe 2026-08-22)
+
+- SoT: `~/.glyph/tasks.json` via `core/tasks.py` + HTTP `/tasks`.
+- Zielkopf optional. Default leer. Köpfe: `grok` · `_code` · `glyph-agent` · `codex`. **Kein** Kopf `analysis`.
+- Belege: Prompt, Antwort, kompakter Trace, Anhang-Metadaten (Pfad/Name) — keine Blobs, keine ganze Session.
+- `pass` Pflicht beim Anlegen. `done` nur mit `artifact` (Pfad/Ort). Chat-Belege sind Kontext, kein Abschluss.
+- Prompt fordert: keine Build-Änderung ohne Nutzerauftrag; Rückfragen als Status `needs_input`.
+- Sichtbar im Glyph-Kalender Tab Plan; Übernehmen legt den Prompt in den Composer. Kein automatischer Kopfwechsel.
+
 ## Settled decisions (Second-Brain Gaps 2026-08-09)
 
 - Pro-Vault-Vertrag: `HSEQ Sync/AGENTS.md`; Wiki: erweiterte `memory-wiki/AGENTS.md` (Ingest ≥1 Synthese-Seite).
-- Skills: `vault-ingest`, `merken` (+ bestehende hseq-*); IDs Alias `hseq-*` = recurring `td-*`.
-- merken (2026-08-13): Schicht-Router — HSEQ-Themen / MEMORY §2 / Repo-CONTEXT / AGENTS nach Ja. Was nicht sofort ins Ziel darf → `~/.glyph/memory/pending-contract.md` (°_Agent darf genau diese eine Datei außerhalb der Vaults).
+- Skills: `vault-ingest`, `merken`, `einmal-job` (+ hseq-*); IDs Alias `hseq-*` = recurring `td-*`.
+- einmal-job (2026-08-20): Wiederkehrendes 1× mit Plan→Ja, dann Recurring (Kalender → Plan). Irreversibel: Plan→Ja. Leben-Admin nicht in Vault. Kein Grok-Bot-Cloud. Recurring nicht per Hand in `recurring.json`. `pass` Pflicht für neue Jobs; ohne prüfbares Fertig kein Recurring.
+- merken (2026-08-13, Wiki-Vorlage 2026-08-28): Schicht-Router — HSEQ-Themen / MEMORY §2 / Repo-CONTEXT / AGENTS nach Ja. Wiki-Ergebnis: Vorlage Aufgabe/Lösung/Datei/Suchbegriffe, Chat-Ja, Ablehnen ohne Suchwert, bestehende Seite zuerst. Keine neuen `summaries/` / `grok-sessions/`, keine Auto-Skills. Was nicht sofort ins Ziel darf → `~/.glyph/memory/pending-contract.md` (°_Agent darf genau diese eine Datei außerhalb der Vaults).
+- Wiki-Hygiene (2026-08-28): `td-wiki-hygiene` verschiebt doppelt tote Wiki-Dateien (`summaries/`, `grok-sessions/`, `unsafe-local-*`, Source-Waisen) nach `_hygiene-trash/` (30 Tage). Chat löscht nicht. Report `reports/hygiene.md`, nicht pending. Regeln nicht nachts. Session-Schließen ohne Wiki-Dump.
 - Handover: Pflicht-**3-Zeilen-Briefing** (Neu / Offen / Konflikt-Stale); Eingang+Log = Beleg, nicht Offen.
 - Index: `_is_blocked` + Hygiene blocken heikle Privat-/Behörden-Pfadmuster (nicht alle `unsafe-local-*`).
 - Privat bleibt außerhalb `VAULT_PATHS` (Red Line).
+
+## Settled decisions (Fortschreiben 2026-08-26)
+
+- Chat °_Agent: CreateNote/ApplyEdit ohne Popup unter `Themen/` und Wiki `concepts|entities|syntheses`. Neue Datei unter `sources/` ja; Apply auf sources/Eingang nein.
+- Kein Delete-Tool im Chat. Leerer Create/Apply wird abgewiesen. Backup bleibt. Job-Korb: ADR 0002 Ausnahme `td-wiki-hygiene`.
+- Nicht aus dem Chat: Vorlagen, Fertig, Hauptarchiv, Privat. Vorlagen nur Job `td-lernen`.
+- ADR `docs/adr/0002-vault-grow-no-delete.md`.
 
 ## Settled decisions (Shared SoT alle Profile 2026-08-09)
 
@@ -120,37 +187,51 @@ _Avoid_: „3-Stufen-Fallback“ / lokaler Chat-Fallback (existiert nicht mehr; 
 - **Capability first** (Phase 1), Kabelsalat-UI Workspaces = Phase 2.
 - SoT `~/.glyph/workspaces.json`; nur Profil **`^_Code`** (Grok unberührt).
 - Defaults: glyph-ui + glyph-agent = `r+w`; openclaw-workspace = `r`.
-- Write flüssig unter r+w; Popup nur elevated; hart-deny bleibt; Fail = hard stop + Banner.
+- Write flüssig unter r+w; Popup nur elevated; hart-deny bleibt; Fail = hard stop + Banner. **Aufgehoben 2026-08-22.**
 
 ## Settled decisions (^_Code Loop — Grill 2026-08-13)
 
-- **Job:** Mehrdatei E2E (lesen → schreiben → Whitelist-Test → kurz sagen).
+- **Auftrag** (früher in diesem Grill „Job“): Mehrdatei E2E (lesen → schreiben → Test → kurz sagen). „Job“ bleibt Recurring.
 - **Verlauf:** echte `messages[]` an Direct/OpenRouter. Budget `CODE_MESSAGE_CHARS` (64k). Älteste Turns weg; **erstes User + letztes Tool-Ergebnis bleiben**. Kein Flatten, das neue Ergebnisse abschneidet.
 - **Orient:** alle **r+w**-`CONTEXT.md` (Abschnitte Orient + System map) im System-Prompt. `r`-Roots eine Zeile. Kein Blind-Grep.
 - **Denker:** Flash bleibt; kein Provider-Wechsel ohne neuen Beleg.
 - **Runden:** `CODE_MAX_ROUNDS=32`. Timeout 180s.
 - **SearchReplace 0×/N×:** zurück in die Loop. Hart tot nur Deny / 🔒 / Nutzer-Ablehnung / Shell-Timeout / Test-Fail.
 - **Grep/ListDir 3× gleich:** nicht ausführen — „Map nutzen oder antworten“.
-- **Nach Write/Replace:** `npm test` oder `pytest` im angebundenen Root (Whitelist, kein Popup). `npm run service:*` bleibt Elevated.
+- **Nach Write/Replace:** fokussierte Tests im Grant (`test`); Ergebnis sichtbar; Fail → kein Commit. `npm run service:*` bleibt einzeln (Deploy/Elevated).
 
 ## Settled decisions (^_Code Workspaces Phase 2 — 2026-08-11)
 
 - Kabelsalat-UI analog Vaults: Buch → Tab **Workspaces**, Hub `^_Code`.
 - API: `GET|POST /workspaces`, `PATCH|DELETE /workspaces/<id>` → Registry CRUD.
 - UI-Proxy: glyph-ui `/api/workspaces` → Agent.
-- Modes: `r` · `rw` · `private` (UI: gesperrt). Keine Pins, kein Obsidian-URI.
+- Modes: `r` · `rw` · `private` (UI: gesperrt). Kein allgemeines `w`. Keine Pins, kein Obsidian-URI.
 - Anbinden: existierendes Verzeichnis (Pfad oder Name unter `$HOME`).
+
+## Settled decisions (^_Code Freigabe — 2026-08-22)
+
+- Formel: Workspace-Recht + Freigabe = Aktion. `r+w` ist Capability.
+- `permission_decision`: WriteFile/SearchReplace unter `r+w` → `requires_grant` (`once` \| `auftrag` \| `task`), nicht `allow`.
+- Grant-Store neben `resume_token`: `grant_id`, `task_id`/`auftrag_id`, Workspace-Root, Pfadpräfixe, Aktionsklassen, Ablauf, Widerruf. Jede Tool-Aktion prüft den Scope erneut.
+- Änderungssatz sammeln → ein Gesamt-Diff → eine Freigabe → transaktionaler Apply → Tests. Nächste Agentenidee = neuer Satz. Kein Auto-Commit.
+- Task nur explizit schließen. Aktion außerhalb Pfade/Aktionsklassen → Grant greift nicht; Hinweis statt Themenklassifikation.
+- Shell: Lesen (`git status`/`diff`, `ls`) unter r+w ohne Freigabe; Testen = Einmal oder Auftrag; lokale Änderung = Auftrag/Task; `npm install`/`npx` immer explizit; Netzwerk eigenes Popup; `git commit` immer Diff+Freigabe; push/deploy/remote immer einzeln. Whitelist = untere Grenze.
+- Kein Session-Always, kein Immer, kein `w` im Kabelsalat. Hart-Deny unverändert.
+- ADR `docs/adr/0001-task-scoped-grants.md`. UI: `glyph-ui/docs/adr/0003-task-scoped-grants.md`.
+- Danach, nicht in diesem Schnitt: Plan vor Änderungen, Git-Worktree pro Task, isolierte Jobs, Audit-Verlauf.
 
 ## Settled decisions (Vault-Inventar 2026-08-08)
 
-- **ListVaultDir** (Agent-Modus): Ordner im Vault listen (read-only). Für „was liegt im Eingang/Fertig?“ — Precheck bei Inventar-Fragen.
+- **ListVaultDir** (Agent-Modus): Ordner im Vault listen (read-only). Für „was liegt im Eingang/Fertig?“ — Precheck bei Inventar-Fragen. Index-Pfade `/VaultName/…` (führender Slash, wie VaultFind) sind Vault-Präfix, kein Dateisystem-Root. Fehlertext nennt angebundene Vaults — nicht als „ungebunden“ lesen.
 - **VaultFind** bleibt Inhaltssuche (Hybrid Embedding+Keyword); listet keine Ordner.
+- **Ordner-Suche Preview** (`POST /vault/find`): zusätzlich Datei- und Ordner**namen** auf Disk (kein Index). Gleichnamige Ordner in mehreren Vaults beide zeigen; Tippfehler `ss`/`s`. Inventar-Fallback `.` (alle Vault-Roots) nur ohne konkreten Ordnernamen — sonst wird der Hauptarchiv-Root nicht den HSEQ-Ordner verdrängen.
 - **search_vault**: Token-Suche + Dateiname/Pfad (nicht nur Fullstring im Body). Datum nur im Namen zählt.
 - Inventar-Fragen mit Jahreszahlen im Namen lösen **kein** Web-Precheck aus (domain-lokal).
 - **Ranking:** Primär-Vault (`VAULT_PATHS[0]`, HSEQ Sync) und `00 Arbeitsfluss/Eingang|Fertig` vor OpenClaw-Wiki-`sources/` / `unsafe-local-*`-Hash-Slugs. Body-Treffer-Cap, damit lange Archiv-Kopien Datums-Queries nicht dominieren. Nutzer trifft gültige Live-Dateien, nicht alte Source-Nummern.
+- **Namens-Match Satzfrage:** ein markantes Dateiname-Token reicht (`kran`/`krane` → `016_Krane.pdf`). Nicht alle Query-Tokens. Kein Token-Levenshtein (`vorliegen` ≠ `Vorlagen`). Dateien vor Ordnern; Ordner namens Vorlagen kein Treffer, Dateien darin schon. Gewählte PDFs (Datei-Tap **und** Ordner-Pick): nach Listing die 1–2 Dateien ReadPdf, deren Name zur Frage passt — nicht Listenplatz, nicht die ersten beliebigen. Text in `results[].text`. Nie den Nutzer fragen, welche PDF zu öffnen.
 
 ## Settled decisions (OpenClaw-Tools 2026-08-07)
 
 - **°_Agent**: Wiki-Aliase `WikiSearch`→VaultFind, `WikiGet`→ReadNote, `WikiApply`→ApplyEdit; `WikiStatus` liest agent-digest (read-only).
-- `BrowseUrl` = TinyFish Extract mit Summary-Goal; `ReadPdf` via pdftotext (Vault only); Mail via himalaya; `MessageSend` via openclaw (write+confirm).
+- `BrowseUrl` = TinyFish Extract mit Summary-Goal; `ReadPdf` liest Vault-PDFs (erlaubt; kein Ingest/Schreiben); Mail via himalaya; `MessageSend` via openclaw (write+confirm).
 - Kein Shell im Agent-Modus. Externe CLIs graceful degrade.
