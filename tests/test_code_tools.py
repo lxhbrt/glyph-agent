@@ -8,11 +8,12 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core import config, code_tools, tool_registry
+from core import config, code_tools, tool_registry, code_grants
 
 
 class CodeToolsTests(unittest.TestCase):
     def setUp(self):
+        code_grants.reset()
         self._tmpdir = tempfile.TemporaryDirectory()
         self.root = self._tmpdir.name
         self._old_roots = list(config.CODE_WORKSPACE_ROOTS)
@@ -27,6 +28,7 @@ class CodeToolsTests(unittest.TestCase):
         config.CODE_WORKSPACES_USE_REGISTRY = self._old_reg
         if self._old_backup is not None:
             config.CODE_BACKUP_DIR = self._old_backup
+        code_grants.reset()
         self._tmpdir.cleanup()
 
     def test_write_read_list(self):
@@ -111,11 +113,12 @@ class CodeToolsTests(unittest.TestCase):
         self.assertEqual(kind, "elevated")
         self.assertTrue(risk)
 
-    def test_permission_write_free_under_rw(self):
+    def test_permission_write_requires_grant_under_rw(self):
         d = code_tools.permission_decision(
             "WriteFile", {"path": "x.txt", "content": "hi"}
         )
-        self.assertEqual(d["action"], "allow")
+        self.assertEqual(d["action"], "requires_grant")
+        self.assertEqual(d.get("action_class"), "file_change")
         d2 = code_tools.permission_decision(
             "RunCommand", {"command": "git status"}
         )
@@ -129,6 +132,30 @@ class CodeToolsTests(unittest.TestCase):
             "RunCommand", {"command": "rm -rf /"}
         )
         self.assertEqual(d4["action"], "deny")
+        d5 = code_tools.permission_decision(
+            "RunCommand", {"command": "git commit -m x"}
+        )
+        self.assertEqual(d5["action"], "requires_grant")
+        self.assertEqual(d5.get("action_class"), "git_commit")
+        d6 = code_tools.permission_decision(
+            "RunCommand", {"command": "npm install left-pad"}
+        )
+        self.assertEqual(d6["action"], "requires_grant")
+        self.assertEqual(d6.get("action_class"), "package_install")
+
+    def test_permission_write_allow_with_task_grant(self):
+        code_grants.issue(
+            "task",
+            workspace_root=self.root,
+            path_prefixes=["."],
+            action_classes=["file_change", "test"],
+            label="Dark Mode",
+        )
+        d = code_tools.permission_decision(
+            "WriteFile", {"path": "x.txt", "content": "hi"}
+        )
+        self.assertEqual(d["action"], "allow")
+        self.assertIn("Task", d.get("reason") or "")
 
     def test_write_execute_without_popup_confirm(self):
         """r+w: WriteFile läuft mit auto-confirm (Policy allow)."""
@@ -310,6 +337,39 @@ class AgentToolsExtTests(unittest.TestCase):
         # Außerhalb Vault → ValueError
         with self.assertRaises(ValueError):
             pdf_tools.read_pdf("/etc/passwd.pdf")
+
+    def test_read_pdf_inner_error_is_not_ok_true(self):
+        """pdftotext fehlt: Tool-Fehler, kein {ok:true} um inneres {ok:false}."""
+        import tempfile
+        from core import config, pdf_tools
+
+        old_bin = pdf_tools._pdftotext_bin
+        old_paths = list(config.VAULT_PATHS)
+        old_path = config.VAULT_PATH
+        with tempfile.TemporaryDirectory(prefix="glyph-pdf-") as td:
+            pdf = os.path.join(td, "016_Krane.pdf")
+            with open(pdf, "wb") as f:
+                f.write(b"%PDF-1.4\n")
+            config.VAULT_PATHS = [td]
+            config.VAULT_PATH = td
+            pdf_tools._pdftotext_bin = lambda: None
+            try:
+                inner = pdf_tools.read_pdf("016_Krane.pdf")
+                self.assertFalse(inner.get("ok"), inner)
+                err = (inner.get("error") or "").lower()
+                self.assertNotIn("brew", err)
+                self.assertNotIn("poppler", err)
+                out = tool_registry.execute(
+                    "ReadPdf", {"path": "016_Krane.pdf"}, mode="agent"
+                )
+                self.assertFalse(out.get("ok"), out)
+                outer_err = (out.get("error") or "").lower()
+                self.assertNotIn("brew", outer_err)
+                self.assertNotIn("poppler", outer_err)
+            finally:
+                pdf_tools._pdftotext_bin = old_bin
+                config.VAULT_PATHS = old_paths
+                config.VAULT_PATH = old_path
 
 
 if __name__ == "__main__":

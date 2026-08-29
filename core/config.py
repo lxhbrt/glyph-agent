@@ -40,17 +40,17 @@ LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs"
 MODE = os.environ.get("MODE", "agent").lower()
 
 # --- Agentenmodus (MODE=agent) ---
-# B+-Default: direct = api.deepseek.com Pro → OpenRouter Flash-0731.
+# B+-Default: direct = api.deepseek.com Vision-Exp → OpenRouter Flash-0731.
 AGENT_PRIMARY_PROVIDER = os.environ.get("AGENT_PRIMARY_PROVIDER", "direct")
 AGENT_OPENROUTER_MODEL = os.environ.get(
-    "AGENT_OPENROUTER_MODEL", "deepseek-v4-pro"
+    "AGENT_OPENROUTER_MODEL", "deepseek-v4-flash-vision-exp"
 )
 AGENT_OPENROUTER_FALLBACK_MODEL = os.environ.get(
     "AGENT_OPENROUTER_FALLBACK_MODEL", "deepseek/deepseek-v4-flash-0731"
 )
 
 # --- OpenRouter-Chat-Modus (MODE=openrouter-chat) ---
-OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "deepseek-v4-pro")
+OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "deepseek-v4-flash-vision-exp")
 OPENROUTER_FALLBACK_MODEL = os.environ.get(
     "OPENROUTER_FALLBACK_MODEL", "deepseek/deepseek-v4-flash-0731"
 )
@@ -80,15 +80,17 @@ DIRECT_API_URL = os.environ.get("DIRECT_API_URL", "https://api.deepseek.com").rs
 EXTERNAL_MAX_CHARS = int(os.environ.get("EXTERNAL_MAX_CHARS", "4000"))
 
 # --- CODE-Modus (^_Code / C′) ---
-# Denker: Direct Flash → OpenRouter Flash-0731 (kein Anthropic/Claude-Code).
+# Denker: Direct Vision-Exp (Text + Screenshots) → OpenRouter Flash-0731.
 CODE_OPENROUTER_MODEL = os.environ.get(
-    "CODE_OPENROUTER_MODEL", "deepseek-v4-flash"
+    "CODE_OPENROUTER_MODEL", "deepseek-v4-flash-vision-exp"
 )
 CODE_OPENROUTER_FALLBACK_MODEL = os.environ.get(
     "CODE_OPENROUTER_FALLBACK_MODEL", "deepseek/deepseek-v4-flash-0731"
 )
-# Screenshots/Bilder: DeepSeek Flash hat oft keine Vision — Luna separat (oder Override).
-CODE_VISION_MODEL = os.environ.get("CODE_VISION_MODEL", "openai/gpt-5.6-luna")
+# Alias: folgt CODE_OPENROUTER_MODEL. Kein getrennter Bild-Hop.
+CODE_VISION_MODEL = os.environ.get(
+    "CODE_VISION_MODEL", "deepseek-v4-flash-vision-exp"
+)
 # Erlaubte Dateisystem-Roots (Komma-getrennt). Nur existierende Dirs nach expanduser.
 # Default: glyph-ui, glyph-agent, ~/.openclaw/workspace; optional ~/grok-chat-ui wenn vorhanden.
 _HOME = os.path.expanduser("~")

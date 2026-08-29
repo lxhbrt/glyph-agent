@@ -9,8 +9,8 @@ Spielregeln: [`CONSTITUTION.md`](./CONSTITUTION.md).
 Nutzerfrage
   → VaultFind (Hybrid: 0.7 Embedding bge-m3 + 0.3 Keyword)   [lokal]
   → Web bei Bedarf: Exa = grob · TinyFish = fein              [API]
-  → OpenRouter deepseek/deepseek-v4-flash-0731 formuliert    [Cloud]
-       → bei Ausfall: inclusionai/ling-3.0-flash:free
+  → Direct deepseek-v4-flash-vision-exp formuliert           [Cloud]
+       → bei Ausfall: OpenRouter deepseek/deepseek-v4-flash-0731
   → Antwort + Trace/Steps
 ```
 
@@ -20,8 +20,8 @@ Ollama läuft **nur** für **Embeddings** (`bge-m3`) — **kein** Chat.
 
 | MODE | Bedeutung | Standard |
 |------|-----------|----------|
-| `agent` | VaultFind + Tools + Cloud-Antwort (DeepSeek Flash → free) | Default |
-| `code` | `^_Code` — Workspace-Tools + DeepSeek (kein VaultFind) | per Request `mode: "code"` oder Env |
+| `agent` | VaultFind + Tools + Cloud-Antwort (Vision-Exp → Flash-0731) | Default |
+| `code` | `^_Code` — Workspace-Tools + Vision-Exp (kein VaultFind) | per Request `mode: "code"` oder Env |
 | `openrouter-chat` | Reiner Chat — kein Wiki/Vault/Tools | — |
 
 ### MODE=`code` (^_Code / C′)
@@ -32,13 +32,15 @@ Separater Pfad, **nicht** der Vault-Default:
 Nutzerfrage (mode=code)
   → ListDir / ReadFile / Grep / SearchReplace / WriteFile / RunCommand
   → nur CODE_WORKSPACE_ROOTS (existierende Dirs)
-  → DeepSeek V4 Flash (OpenRouter) formuliert
+  → Direct deepseek-v4-flash-vision-exp formuliert
+       → bei Ausfall: OpenRouter deepseek/deepseek-v4-flash-0731
   → Write/Shell → pending_confirmation + resume_token (Glyph-Genehmigung)
 ```
 
 | Variable | Default | Bedeutung |
 |----------|---------|-----------|
-| `CODE_OPENROUTER_MODEL` | `deepseek/deepseek-v4-flash-0731` | Denker |
+| `CODE_OPENROUTER_MODEL` | `deepseek-v4-flash-vision-exp` | Denker (Text + Bilder) |
+| `CODE_OPENROUTER_FALLBACK_MODEL` | `deepseek/deepseek-v4-flash-0731` | Reserve wie °_Agent |
 | `CODE_WORKSPACE_ROOTS` | `~/glyph-ui,~/glyph-agent,~/.openclaw/workspace` (+ `~/grok-chat-ui` wenn Dir existiert) | erlaubte Roots (nur existierende) |
 | `CODE_WORKSPACE_ONLY` | `true` | roots-only (v1 immer; Env reserviert) |
 | `CODE_SHELL_TIMEOUT` | `60` | Shell-Timeout (s) |
@@ -151,11 +153,11 @@ Alle Werte in `core/config.py` bzw. per Umgebungsvariable/`.env`.
 | Variable | Default | Bedeutung |
 |----------|---------|-----------|
 | `MODE` | `agent` | `agent` \| `openrouter-chat` |
-| `AGENT_PRIMARY_PROVIDER` | `openrouter` | `openrouter` \| `fallback` (Alias) |
-| `AGENT_OPENROUTER_MODEL` | `deepseek/deepseek-v4-flash-0731` | Primär-Cloud-Denker |
-| `AGENT_OPENROUTER_FALLBACK_MODEL` | `inclusionai/ling-3.0-flash:free` | Free bei Ausfall |
-| `OPENROUTER_MODEL` | `deepseek/deepseek-v4-flash-0731` | Modell im `openrouter-chat`-Modus |
-| `OPENROUTER_FALLBACK_MODEL` | `inclusionai/ling-3.0-flash:free` | Free im Chat-Modus |
+| `AGENT_PRIMARY_PROVIDER` | `direct` | `direct` \| `openrouter` \| `fallback` |
+| `AGENT_OPENROUTER_MODEL` | `deepseek-v4-flash-vision-exp` | Primär-Cloud-Denker |
+| `AGENT_OPENROUTER_FALLBACK_MODEL` | `deepseek/deepseek-v4-flash-0731` | OpenRouter bei Direct-Ausfall |
+| `OPENROUTER_MODEL` | `deepseek-v4-flash-vision-exp` | Modell im `openrouter-chat`-Modus |
+| `OPENROUTER_FALLBACK_MODEL` | `deepseek/deepseek-v4-flash-0731` | Reserve im Chat-Modus |
 | `EXTERNAL_MAX_CHARS` | `4000` | Kürzung vor Cloud-Übergabe |
 | `OPENROUTER_API_KEY` | — | Pflicht für Chat |
 
@@ -163,9 +165,10 @@ Alle Werte in `core/config.py` bzw. per Umgebungsvariable/`.env`.
 
 ```env
 MODE=agent
-AGENT_PRIMARY_PROVIDER=openrouter
-AGENT_OPENROUTER_MODEL=deepseek/deepseek-v4-flash-0731
-AGENT_OPENROUTER_FALLBACK_MODEL=inclusionai/ling-3.0-flash:free
+AGENT_PRIMARY_PROVIDER=direct
+AGENT_OPENROUTER_MODEL=deepseek-v4-flash-vision-exp
+AGENT_OPENROUTER_FALLBACK_MODEL=deepseek/deepseek-v4-flash-0731
+CODE_OPENROUTER_MODEL=deepseek-v4-flash-vision-exp
 OPENROUTER_API_KEY=sk-or-…
 ```
 
@@ -243,7 +246,7 @@ Geklärtes und Lektionen stehen in Dateien — im Chat **nicht** neu erzählen.
 |-------|--------|---------|
 | **HSEQ Sync** | lesen+schreiben | `…/HSEQ Sync/AGENTS.md` |
 | ASI, BS. UWS, QM, EM | lesen | Facharchiv |
-| OpenClaw memory-wiki | lesen+schreiben | `…/OpenClaw memory-wiki/AGENTS.md` |
+| memory-wiki | lesen+schreiben | `…/memory-wiki/AGENTS.md` |
 | Peniel | lesen | — |
 | **Privat** | **nie** | Red Line (nicht in `VAULT_PATHS`) |
 
@@ -257,7 +260,8 @@ Jobs / Skills / Prompts: siehe HSEQ `AGENTS.md` und `Vorlagen/Jobs/`.
 | `hseq-handover` | `td-handover` | 18:30 Daily + **3-Zeilen-Briefing** |
 | `hseq-aus-fertig-lernen` | `td-lernen` | Fr 19:00 max. 1 Compounding-Edit |
 | `vault-ingest` | — | Quelle → Claims/Links (≥1 Synthese) |
-| `merken` | — | 1 Claim → Schicht (Themen/MEMORY/CONTEXT; AGENTS erst nach Ja) |
+| `merken` | — | 1 Erkenntnis → Schicht; Wiki nach Vorlage + Chat-Ja; Ablehnen ohne Suchwert |
+| `einmal-job` | — | 1× Plan→Ja, dann Recurring (Kalender → Plan) |
 
 ```bash
 python3 scripts/run_job.py hseq-eingang --force          # = td-eingang

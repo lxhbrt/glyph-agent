@@ -155,6 +155,8 @@ def apply_models(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     config.OPENROUTER_FALLBACK_MODEL = fallback or ""
     config.CODE_OPENROUTER_MODEL = code_primary
     config.CODE_OPENROUTER_FALLBACK_MODEL = code_fallback or ""
+    config.CODE_VISION_MODEL = code_primary
+    _set_env("CODE_VISION_MODEL", code_primary)
 
     _set_env("AGENT_OPENROUTER_MODEL", primary)
     _set_env("AGENT_OPENROUTER_FALLBACK_MODEL", fallback)
@@ -182,7 +184,7 @@ def apply_models(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def apply_direct(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Hot-apply Direct-URL/Key (OpenAI-kompatibler Primär-Hop)."""
+    """Hot-apply Direct URL/Key. Rebuilds the provider singleton."""
     body = payload if isinstance(payload, dict) else {}
     url = _norm_id(body.get("url") or body.get("DIRECT_API_URL"))
     if url:
@@ -201,19 +203,23 @@ def apply_direct(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         if not key:
             os.environ.pop("DIRECT_API_KEY", None)
 
+    or_present = any(
+        k in body for k in ("openrouter_key", "OPENROUTER_API_KEY")
+    )
+    if or_present:
+        raw_or = body.get("openrouter_key")
+        if raw_or is None:
+            raw_or = body.get("OPENROUTER_API_KEY")
+        or_key = _norm_id(raw_or)
+        _set_env("OPENROUTER_API_KEY", or_key or None)
+        if not or_key:
+            os.environ.pop("OPENROUTER_API_KEY", None)
+
+    factory.reset_provider()
     try:
-        p = llm.get_provider()
+        llm.get_provider()
     except Exception:
-        factory.reset_provider()
-        p = llm.get_provider()
-
-    if p is not None and getattr(p, "provider_name", "") == "direct":
-        if url:
-            p.url = getattr(config, "DIRECT_API_URL", url)
-        if key_present:
-            from .providers.direct import resolve_direct_key
-
-            p.api_key = resolve_direct_key()
+        pass
 
     snap = current_models_snapshot()
     snap["direct"] = {

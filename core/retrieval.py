@@ -385,7 +385,7 @@ def _keyword_boost(query: str, doc: dict) -> float:
     return boost
 
 
-def search(query, top_k=None, min_score=None):
+def search(query, top_k=None, min_score=None, roots=None):
     """
     Semantische Suche im Vektorindex mit Hybrid-Reranking (Vektor + Keyword-Boost).
 
@@ -410,6 +410,10 @@ def search(query, top_k=None, min_score=None):
     final_k = top_k
     index = load_index()
     docs = index.get("docs", [])
+    if roots is not None:
+        from . import vault_scope as _vs
+
+        docs = [d for d in docs if _vs.path_in_roots(d.get("path"), roots)]
     if not docs:
         return {
             "status": "empty", "query": query, "candidates": 0, "selected": 0,
@@ -458,7 +462,7 @@ def search(query, top_k=None, min_score=None):
 # --- B+ VaultFind: 0.7 Embedding + 0.3 Keyword (OpenClaw hybrid) ------------
 
 def vault_find(query, top_k=None, min_score=None,
-               vector_weight=None, text_weight=None):
+               vector_weight=None, text_weight=None, roots=None):
     """
     Kanonisches Finde-Werkzeug (B+).
 
@@ -484,8 +488,24 @@ def vault_find(query, top_k=None, min_score=None,
     wsum = (vector_weight or 0) + (text_weight or 0) or 1.0
     vw, tw = vector_weight / wsum, text_weight / wsum
 
+    if roots is not None:
+        roots = [r for r in roots if r]
+        if not roots:
+            return {
+                "status": "empty",
+                "query": query,
+                "mode": "hybrid",
+                "candidates": 0,
+                "selected": 0,
+                "threshold": min_score,
+                "sources": [],
+                "results": [],
+                "top_k": top_k,
+                "keyword_hits": 0,
+            }
+
     # --- Embedding-Zweig (niedrigere Schwelle: Merge entscheidet) ---
-    sem = search(query, top_k=max(top_k * 3, 12), min_score=0.0)
+    sem = search(query, top_k=max(top_k * 3, 12), min_score=0.0, roots=roots)
     vec_by_path = {}
     for r in (sem.get("results") or []):
         p = r.get("path")
@@ -495,11 +515,17 @@ def vault_find(query, top_k=None, min_score=None,
         vs = float(r.get("vector_score") if r.get("vector_score") is not None else r.get("score") or 0)
         if p not in vec_by_path or vs > vec_by_path[p]["vector"]:
             vec_by_path[p] = {"vector": vs, "meta": r}
+    if roots:
+        from . import vault_scope as _vs
+
+        vec_by_path = {
+            p: v for p, v in vec_by_path.items() if _vs.path_in_roots(p, roots)
+        }
 
     # --- Keyword-Zweig ---
     kw_raw = []
     try:
-        kw_raw = vault_tools.search_vault(query, limit=max(top_k * 5, 20)) or []
+        kw_raw = vault_tools.search_vault(query, limit=max(top_k * 5, 20), roots=roots) or []
     except Exception:
         kw_raw = []
     max_hits = max((int(h.get("hits") or 0) for h in kw_raw), default=0) or 1

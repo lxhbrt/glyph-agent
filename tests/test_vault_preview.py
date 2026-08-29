@@ -187,11 +187,132 @@ def test_hseq_folder_and_new_note_in_preview():
             config.VAULT_PATH = old_path
 
 
+
+def test_canon_strips_disk_home():
+    print("\n[4] Disk-Home wird zu /VaultName/rel:")
+    from core import config, vault_tools
+
+    old_paths = list(config.VAULT_PATHS)
+    old_path = config.VAULT_PATH
+    try:
+        config.VAULT_PATHS = [
+            "/Users/lxndrhbrt/ObsidianVaults/HSEQ Sync",
+            "/Users/lxndrhbrt/ObsidianVaults/ASI, BS. UWS, QM, EM",
+        ]
+        config.VAULT_PATH = config.VAULT_PATHS[0]
+        got = vault_tools.canon_vault_path(
+            "/lxndrhbrt/ObsidianVaults/HSEQ Sync/Vorlagen/Begehungen/Begehung - Arbeitsschutz KFZ-Werkstatt.md"
+        )
+        check(
+            "HSEQ ohne Home",
+            got == "/HSEQ Sync/Vorlagen/Begehungen/Begehung - Arbeitsschutz KFZ-Werkstatt.md",
+            got,
+        )
+        got2 = vault_tools.canon_vault_path(
+            "/Users/lxndrhbrt/ObsidianVaults/ASI, BS. UWS, QM, EM/Schulung/029 Arbeitsschutzmanagement"
+        )
+        check(
+            "ASI-Ordner",
+            got2 == "/ASI, BS. UWS, QM, EM/Schulung/029 Arbeitsschutzmanagement",
+            got2,
+        )
+        got3 = vault_tools.canon_vault_path("/HSEQ Sync/Themen/PSA.md")
+        check("schon kanonisch", got3 == "/HSEQ Sync/Themen/PSA.md", got3)
+    finally:
+        config.VAULT_PATHS = old_paths
+        config.VAULT_PATH = old_path
+
+
+def test_index_hang_does_not_block_named_hits():
+    print("\n[5] langsamer Index blockiert Disk-Treffer nicht:")
+    import time as _time
+    from core import config, vault_preview
+    import core.retrieval as retrieval_mod
+
+    old_find = retrieval_mod.vault_find
+    old_paths = list(config.VAULT_PATHS)
+    old_path = config.VAULT_PATH
+    old_wait = vault_preview.INDEX_WAIT_WITH_HITS_S
+
+    def _slow(*a, **k):
+        _time.sleep(8)
+        return {"status": "success", "results": []}
+
+    retrieval_mod.vault_find = _slow
+    vault_preview.INDEX_WAIT_WITH_HITS_S = 0.4
+    with __import__("tempfile").TemporaryDirectory(prefix="glyph-preview-fast-") as td:
+        hseq, asi = _setup_two_vaults(td)
+        config.VAULT_PATHS = [asi, hseq]
+        config.VAULT_PATH = asi
+        t0 = _time.monotonic()
+        try:
+            res = vault_preview.preview_vault_hits("Arbeitssicherheit", budget_s=6)
+        finally:
+            retrieval_mod.vault_find = old_find
+            vault_preview.INDEX_WAIT_WITH_HITS_S = old_wait
+            config.VAULT_PATHS = old_paths
+            config.VAULT_PATH = old_path
+        elapsed = _time.monotonic() - t0
+        paths = [h.get("path") for h in res.get("hits") or []]
+        check("unter 3s", elapsed < 3.0, f"{elapsed:.2f}s")
+        check(
+            "HSEQ-Ordner trotzdem da",
+            "/HSEQ Sync/Arbeitssicherheit" in paths,
+            f"-> {paths}",
+        )
+
+
+def test_same_disk_file_listed_once():
+    print("\n[6] dieselbe Datei auf der Platte nur einmal:")
+    import tempfile
+    from core import config, vault_preview
+    import core.retrieval as retrieval_mod
+
+    old_find = retrieval_mod.vault_find
+    old_paths = list(config.VAULT_PATHS)
+    old_path = config.VAULT_PATH
+    retrieval_mod.vault_find = lambda query, top_k=None, min_score=None, **kw: {
+        "status": "success",
+        "results": [
+            {
+                "path": "/lxndrhbrt/ObsidianVaults/ASI, BS. UWS, QM, EM/Arbeitssicherheit/00 MOC - Arbeitssicherheit.md",
+                "title": "00 MOC - Arbeitssicherheit.md",
+                "text": "ASI Archiv",
+                "score": 0.9,
+            },
+            {
+                "path": "/ASI, BS. UWS, QM, EM/Arbeitssicherheit/00 MOC - Arbeitssicherheit.md",
+                "title": "00 MOC - Arbeitssicherheit.md",
+                "text": "ASI Archiv",
+                "score": 0.8,
+            },
+        ],
+    }
+    with tempfile.TemporaryDirectory(prefix="glyph-preview-id-") as td:
+        hseq, asi = _setup_two_vaults(td)
+        config.VAULT_PATHS = [asi, hseq, td]
+        config.VAULT_PATH = asi
+        try:
+            res = vault_preview.preview_vault_hits("Arbeitssicherheit")
+        finally:
+            retrieval_mod.vault_find = old_find
+            config.VAULT_PATHS = old_paths
+            config.VAULT_PATH = old_path
+        files = [h.get("path") for h in res.get("hits") or [] if h.get("kind") == "file" and str(h.get("path") or "").endswith("00 MOC - Arbeitssicherheit.md")]
+        junk = [p for p in files if "ObsidianVaults" in p or p.startswith("/lxndrhbrt")]
+        check("kein Home-Pfad", junk == [], str(files))
+        asi_hits = [p for p in files if p.startswith("/ASI, BS. UWS, QM, EM/")]
+        check("ASI-Pfad bleibt", len(asi_hits) >= 1, str(files))
+
+
 def main():
     print("=== Vault-Preview ===")
     test_empty_query()
     test_files_and_parent_folders()
     test_hseq_folder_and_new_note_in_preview()
+    test_canon_strips_disk_home()
+    test_index_hang_does_not_block_named_hits()
+    test_same_disk_file_listed_once()
     print(f"\n=== Ergebnis: {OK} ok, {FAIL} Fehler ===")
     sys.exit(1 if FAIL else 0)
 

@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 
 from . import config, log
+from . import code_grants
 
 # Absolute Maxima (Defense in Depth)
 _MAX_READ_BYTES = 512 * 1024
@@ -82,6 +83,36 @@ def _ordered_roots():
     return list(roots)
 
 
+def _deny_secret(cand):
+    """Secret-/Config-Dateien im erlaubten Zimmer sind gesperrt (Safe im Raum).
+
+    True, wenn der aufgeloeste absolute Pfad eine Secret-/Config-Datei mit
+    Schluesseln, Tokens oder privaten Daten adressiert. Blockiert Lesen UND
+    Schreiben fuer alle Datei-Tools (read_file/write_file/search_replace/grep).
+    """
+    if not cand:
+        return True
+    name = os.path.basename(str(cand)).lower()
+    parts = str(cand).split(os.sep)
+    # .env-Dateien (und Varianten) — aber Beispiel-/Template-Dateien erlauben
+    env_templ = name.startswith(".env.example") or name.startswith(".env.sample") \
+        or name.startswith(".env.template")
+    if name == ".env" or (name.startswith(".env.") and not env_templ):
+        return True
+    # Sonstige Secret-/Config-Dateinamen
+    if name in (
+        ".npmrc", ".pypirc", ".netrc", "credentials", "credentials.json",
+        "secrets.json", "service_account.json", "kubeconfig",
+        "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa", "authorized_keys",
+        "config.json", "known_hosts",
+    ):
+        return True
+    # Stets gesperrte private Unterordner innerhalb eines Roots
+    if any(seg in (".ssh", ".aws", ".gnupg", ".kube", "gcloud") for seg in parts):
+        return True
+    return False
+
+
 def _resolve_path(path):
     """
     Löst path relativ zu einem Workspace-Root auf.
@@ -106,10 +137,22 @@ def _resolve_path(path):
                 if len(root) > best_len:
                     best = (cand, root)
                     best_len = len(root)
+        if best and _deny_secret(best[0]):
+            return None, None
         return best if best else (None, None)
 
     # Relativ: Root-Name (Basename) direkt auflösen, sonst Primary zuerst,
     # dann übrige Roots (projektrelativer Pfad kann in jedem Root liegen).
+    # 0) "glyph-ui/client/…" → /…/glyph-ui/client/…  (Basename ersetzt den Root,
+    #    statt ihn doppelt zu stapeln). Sonst würde "glyph-ui/client/..." zu
+    #    "/…/glyph-ui/glyph-ui/client/..." aufgelöst.
+    for root in roots:
+        base = os.path.basename(root.rstrip("/"))
+        if base and (raw == base or raw.startswith(base + "/")):
+            rest = raw[len(base):].lstrip("/")
+            cand = os.path.realpath(os.path.join(root, rest)) if rest else root
+            if cand == root or cand.startswith(root + os.sep):
+                return (None, None) if _deny_secret(cand) else (cand, root)
     # 1) Basename eines bekannten Roots → Root selbst (z. B. "glyph-ui" → /…/glyph-ui)
     for root in roots:
         if os.path.basename(root.rstrip("/")) == raw:
@@ -124,6 +167,8 @@ def _resolve_path(path):
     for root in ordered:
         cand = os.path.realpath(os.path.join(root, raw))
         if cand == root or cand.startswith(root + os.sep):
+            if _deny_secret(cand):
+                continue
             if first_zip is None:
                 first_zip = (cand, root)
             # Existierender Treffer gewinnt (Lese-Fall: Datei liegt real dort)
@@ -610,7 +655,11 @@ _HARD_DENY_PATTERNS = [
     r"\bdoas\b",
     r"\bmkfs\b",
     r"\bdd\b",
-    r">\s*/",
+    # Redirect auf einen echten Pfad — ABER Standard-Devices (/dev/null, /dev/zero,
+    # /dev/random, /dev/tty) sind harmlos. Nutzer-Freigabe soll für die gelten.
+    r">\s*/dev/(?!null|zero|random|urandom|tty)\b",
+    r">\s*/(?!dev/null|dev/zero|dev/random|dev/urandom|dev/tty)\S",
+
     r"\bcurl\b.*\|\s*(ba)?sh",
     r"\bwget\b.*\|\s*(ba)?sh",
     r"\bshutdown\b",
@@ -642,6 +691,45 @@ _DENY_PATTERNS = list(_HARD_DENY_PATTERNS) + [
 
 def _default_allow_patterns():
     return list(getattr(config, "CODE_SHELL_ALLOW", None) or [])
+
+
+def shell_action_class(command):
+    """Aktionsklasse für Grant-Checks. kind bleibt shell_classify.
+
+    Returns: (action_class, kind, reason)
+      action_class: read | test | file_change | package_install |
+                    git_commit | network | deploy | deny
+    """
+    kind, reason = shell_classify(command)
+    cmd = (command or "").strip()
+    if kind == "deny":
+        return "deny", kind, reason
+    if re.search(r"^git\s+commit\b", cmd, re.IGNORECASE):
+        return "git_commit", kind, reason
+    if re.search(r"^npx\b", cmd, re.IGNORECASE) or re.search(
+        r"^npm\s+(install|ci)\b", cmd, re.IGNORECASE
+    ):
+        return "package_install", kind, reason
+    if re.search(r"\b(curl|wget)\b", cmd, re.IGNORECASE):
+        return "network", kind, reason
+    if kind == "elevated":
+        return "deploy", kind, reason
+    if re.search(
+        r"^(npm\s+(test|run\s+test(:|\b))|pytest|python3?\s+-m\s+(pytest|unittest))\b",
+        cmd,
+        re.IGNORECASE,
+    ):
+        return "test", kind, reason
+    if re.search(
+        r"^(ls|pwd|echo|cat|head|tail|wc|rg|grep|find|diff|"
+        r"git\s+(status|diff|log|show|branch|rev-parse|remote)|"
+        r"python3? --version|node --version|npm --version|"
+        r"npm\s+(ls|view|outdated|pack))\b",
+        cmd,
+        re.IGNORECASE,
+    ):
+        return "read", kind, reason
+    return "file_change", kind, reason
 
 
 def shell_classify(command):
@@ -785,11 +873,25 @@ def run_command(command, cwd=None, timeout=None, allow_elevated=False):
     }
 
 
+def _grant_fields(root, rel, action_class, preview):
+    hint = code_grants.outside_task_hint(root, rel, action_class)
+    return {
+        "action_class": action_class,
+        "workspace_root": root or "",
+        "rel_path": rel or "",
+        "outside_task": bool(hint),
+        "hint": hint,
+        "preview": preview,
+        "elevated": False,
+        "risk": hint or "",
+    }
+
+
 def permission_decision(tool_name, args):
     """
     Policy für ^_Code-Tools.
     Returns dict:
-      action: "allow" | "confirm" | "deny"
+      action: "allow" | "confirm" | "requires_grant" | "deny"
       reason: str
       elevated: bool
       risk: str
@@ -820,32 +922,44 @@ def permission_decision(tool_name, args):
     if name in ("WriteFile", "SearchReplace"):
         path = args.get("path")
         abs_path, root = _resolve_path(path)
+        preview = preview_for_confirm(name, args)
         if not abs_path:
             return {
                 "action": "deny",
                 "reason": f"Pfad außerhalb der Workspace-Roots: {path}",
                 "elevated": False,
                 "risk": "",
-                "preview": preview_for_confirm(name, args),
+                "preview": preview,
             }
         mode = mode_for_resolved(root)
-        if mode == "rw":
+        if mode != "rw":
             return {
-                "action": "allow",
-                "reason": "Workspace r+w — Write ohne Popup",
+                "action": "deny",
+                "reason": (
+                    f"Schreiben verboten: Mode {mode or '?'} "
+                    f"(braucht r+w) — {root}"
+                ),
                 "elevated": False,
                 "risk": "",
-                "preview": preview_for_confirm(name, args),
+                "preview": preview,
             }
+        rel = _rel_display(abs_path, root)
+        hit = code_grants.matching(root, rel, "file_change")
+        if hit:
+            return {
+                "action": "allow",
+                "reason": code_grants.why_allowed(hit),
+                "elevated": False,
+                "risk": "",
+                "preview": preview,
+                "grant_id": hit.get("grant_id"),
+                "allowed_by": code_grants.why_allowed(hit),
+            }
+        extra = _grant_fields(root, rel, "file_change", preview)
         return {
-            "action": "deny",
-            "reason": (
-                f"Schreiben verboten: Mode {mode or '?'} "
-                f"(braucht r+w) — {root}"
-            ),
-            "elevated": False,
-            "risk": "",
-            "preview": preview_for_confirm(name, args),
+            "action": "requires_grant",
+            "reason": extra["hint"] or "Freigabe für Dateiänderung",
+            **extra,
         }
 
     if name == "RunCommand":
@@ -864,17 +978,17 @@ def permission_decision(tool_name, args):
                 }
             abs_cwd, root = roots[0], roots[0]
         mode = mode_for_resolved(root)
+        preview = preview_for_confirm(name, args)
         if mode != "rw":
             return {
                 "action": "deny",
                 "reason": f"Shell verboten: Mode {mode or '?'} (braucht r+w)",
                 "elevated": False,
                 "risk": "",
-                "preview": preview_for_confirm(name, args),
+                "preview": preview,
             }
-        kind, reason = shell_classify(cmd)
-        preview = preview_for_confirm(name, args)
-        if kind == "deny":
+        action_class, kind, reason = shell_action_class(cmd)
+        if kind == "deny" or action_class == "deny":
             return {
                 "action": "deny",
                 "reason": f"Shell abgelehnt: {reason}",
@@ -882,21 +996,49 @@ def permission_decision(tool_name, args):
                 "risk": "",
                 "preview": preview,
             }
-        if kind == "elevated":
-            risk = reason or "Elevated Shell"
+        if kind == "elevated" or action_class in code_grants.ALWAYS_ONCE:
+            risk = reason or action_class
+            extra = _grant_fields(
+                root, _rel_display(abs_cwd, root), action_class, preview
+            )
             return {
-                "action": "confirm",
+                "action": "requires_grant" if kind != "elevated" else "confirm",
                 "reason": risk,
-                "elevated": True,
+                "elevated": kind == "elevated",
                 "risk": risk,
-                "preview": f"⚠ {risk}\n\n{preview}",
+                "preview": f"⚠ {risk}\n\n{preview}" if kind == "elevated" else preview,
+                "action_class": action_class,
+                "workspace_root": extra["workspace_root"],
+                "rel_path": extra["rel_path"],
+                "outside_task": extra["outside_task"],
+                "hint": extra["hint"],
             }
+        if action_class == "read":
+            return {
+                "action": "allow",
+                "reason": "Lesen-Shell unter r+w",
+                "elevated": False,
+                "risk": "",
+                "preview": preview,
+            }
+        rel = _rel_display(abs_cwd, root)
+        hit = code_grants.matching(root, rel, action_class)
+        if hit:
+            why = code_grants.why_allowed(hit)
+            return {
+                "action": "allow",
+                "reason": why,
+                "elevated": False,
+                "risk": "",
+                "preview": preview,
+                "grant_id": hit.get("grant_id"),
+                "allowed_by": why,
+            }
+        extra = _grant_fields(root, rel, action_class, preview)
         return {
-            "action": "allow",
-            "reason": "Whitelist-Shell unter r+w",
-            "elevated": False,
-            "risk": "",
-            "preview": preview,
+            "action": "requires_grant",
+            "reason": extra["hint"] or f"Freigabe für {action_class}",
+            **extra,
         }
 
     # Unknown write-ish: confirm

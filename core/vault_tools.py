@@ -335,16 +335,62 @@ def path_source_rank(rel_path, vault_name=None, query=None):
 
 
 def canon_vault_path(path):
-    """Einheitlicher Trefferpfad: /VaultName/rel — ohne doppelte Schrägstriche."""
+    """Einheitlicher Trefferpfad: /VaultName/rel — ohne Disk-Home und ohne doppelte Schrägstriche."""
     p = str(path or "").replace("\\", "/").strip()
     if not p or p in (".", "/"):
         return p if p == "." else "/"
-    if not p.startswith("/"):
-        p = "/" + p
     while "//" in p:
         p = p.replace("//", "/")
     if len(p) > 1:
         p = p.rstrip("/")
+
+    names = _bound_vault_names()
+    names_sorted = sorted(names, key=len, reverse=True)
+
+    def _from_vault_prefix(norm):
+        n = norm.lstrip("/")
+        for name in names_sorted:
+            if n == name:
+                return "/" + name
+            if n.startswith(name + "/"):
+                return "/" + n
+        return None
+
+    hit = _from_vault_prefix(p)
+    if hit:
+        return hit
+
+    for name in names_sorted:
+        marker = "/" + name
+        if p == marker or p.endswith("/" + name):
+            return marker
+        idx = p.find(marker + "/")
+        if idx >= 0:
+            return p[idx:]
+
+    abs_p = None
+    if p.startswith("/"):
+        try:
+            abs_p = os.path.realpath(p)
+        except OSError:
+            abs_p = None
+    if abs_p:
+        for v in getattr(config, "VAULT_PATHS", [config.VAULT_PATH]) or []:
+            if not v:
+                continue
+            try:
+                vr = os.path.realpath(v)
+            except OSError:
+                continue
+            if abs_p == vr or abs_p.startswith(vr + os.sep):
+                rel = os.path.relpath(abs_p, vr).replace("\\", "/")
+                name = os.path.basename(vr)
+                if rel in (".", ""):
+                    return "/" + name
+                return "/" + name + "/" + rel
+
+    if not p.startswith("/"):
+        p = "/" + p
     return p
 
 
@@ -383,10 +429,84 @@ def _edit_distance(a, b, limit=2):
     return prev[-1]
 
 
+# Dateiname-Füller: treffen viele DGUV-PDFs, dürfen 209-007 / Krane nicht überstimmen.
+_GENERIC_NAME_TOKS = frozenset({
+    "dguv", "information", "informationen", "vorschrift", "vorschriften",
+    "handlungsleitfaden", "leitlinie", "leitfaden", "merkblatt",
+    "regel", "regeln", "formular", "muster",
+})
+
+
+def _number_compacts(text):
+    """Ziffernfolgen und benachbarte Paare (209-007 → 209, 007, 209007)."""
+    parts = re.findall(r"\d+", text or "")
+    out = []
+    for p in parts:
+        if len(p) >= 3:
+            out.append(p)
+    for i in range(len(parts) - 1):
+        pair = parts[i] + parts[i + 1]
+        if len(pair) >= 5:
+            out.append(pair)
+    return out
+
+
+def _is_generic_name_tok(t):
+    return bool(t) and t in _GENERIC_NAME_TOKS
+
+
+def _distinctive_query_tokens(tokens):
+    """Query-Tokens ohne DGUV/Information/Vorschrift — Zahlen und seltene Wörter."""
+    out = []
+    for t in tokens or []:
+        _, t_c, _ = _fold_name(t)
+        if not t_c or _is_generic_name_tok(t_c):
+            continue
+        out.append(t)
+    return out
+
+
+def _token_in_name(t, t_c, n_sp, n_c):
+    if not t_c:
+        return False
+    if t_c in n_c or (t and t in n_sp):
+        return True
+    nums = re.sub(r"[^0-9]", "", t_c)
+    if len(nums) >= 3 and nums in set(_number_compacts(n_sp)):
+        return True
+    return False
+
+
+def _token_pair_score(a, b):
+    """
+    Treffer-Score für ein Query-Token gegen ein Dateiname-Token.
+    kran/krane ja (kurze Flexion). betrieb/betriebssicherheit nein.
+    vorliegen/vorlagen nein (kein Levenshtein).
+    """
+    if not a or not b:
+        return 0
+    if a == b:
+        if a.isdigit() and len(a) >= 3:
+            return 92
+        if len(a) >= 5:
+            return 88
+        if len(a) >= 4:
+            return 84
+        if len(a) >= 3:
+            return 72
+        return 0
+    shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
+    if len(shorter) >= 4 and longer.startswith(shorter) and (len(longer) - len(shorter)) <= 2:
+        return 82
+    return 0
+
+
 def name_match_score(query, name):
     """
     Score 0–100: heißt der Ordner/die Datei so wie die Frage?
     Unabhängig vom Embedding-Index; Tippfehler ss/s (Arbeitssicherheit).
+    Satzfragen: ein markantes Dateiname-Token reicht (nicht alle Query-Tokens).
+    Zahlen (209-007) und seltene Wörter schlagen DGUV/Vorschrift/Information.
     """
     n_sp, n_c, n_d = _fold_name(name)
     if not n_c:
@@ -395,31 +515,71 @@ def name_match_score(query, name):
     tokens = [t for t in _tokenize_query(query) if len(t) >= 3]
     if q_c and (q_c == n_c or q_d == n_d):
         return 100
-    if n_c and q_c and len(n_c) >= 6 and (n_c in q_c or (len(q_c) >= 6 and q_c in n_c)):
-        return 90
-    if n_d and q_d and len(n_d) >= 6 and (n_d in q_d or q_d in n_d):
-        return 88
-    if tokens:
+
+    best = 0
+    dist_toks = _distinctive_query_tokens(tokens)
+    n_nums = set(_number_compacts(n_sp))
+    q_nums = set()
+    for t in tokens:
+        q_nums.update(_number_compacts(t))
+        _, t_c, _ = _fold_name(t)
+        q_nums.update(_number_compacts(t_c))
+    hit_nums = q_nums & n_nums
+    if hit_nums:
+        if any(len(x) >= 6 for x in hit_nums):
+            best = max(best, 96)
+        else:
+            best = max(best, 92)
+
+    compact_hit = bool(
+        n_c and q_c and len(n_c) >= 6
+        and (n_c in q_c or (len(q_c) >= 6 and q_c in n_c))
+    )
+    dedup_hit = bool(
+        n_d and q_d and len(n_d) >= 6
+        and (n_d in q_d or (len(q_d) >= 6 and q_d in n_d))
+    )
+    if compact_hit:
+        best = max(best, 90 if dist_toks else 72)
+    elif dedup_hit:
+        best = max(best, 88 if dist_toks else 72)
+
+    score_toks = dist_toks if dist_toks else tokens
+    if score_toks:
         ok = True
-        for t in tokens:
+        for t in score_toks:
             _, t_c, _t_d = _fold_name(t)
-            if not t_c or (t_c not in n_c and t not in n_sp):
+            if not _token_in_name(t, t_c, n_sp, n_c):
                 ok = False
                 break
         if ok:
-            return 80
+            best = max(best, 94 if dist_toks else 80)
+
     if len(n_d) >= 8 and len(q_d) >= 8 and _edit_distance(q_d, n_d, 2) <= 2:
-        return 75
-    best = 0
-    for t in tokens:
+        best = max(best, 75)
+
+    name_toks = [t for t in n_sp.split() if t]
+    primary = ""
+    for nt in reversed(name_toks):
+        if len(nt) >= 4 and not nt.isdigit() and not _is_generic_name_tok(nt):
+            primary = nt
+            break
+    pair_toks = dist_toks if dist_toks else tokens
+    for t in pair_toks:
         _, t_c, t_d = _fold_name(t)
         if not t_c:
             continue
         if t_c == n_c or t_d == n_d:
             best = max(best, 85)
-        elif len(t_d) >= 8 and len(n_d) >= 8 and _edit_distance(t_d, n_d, 2) <= 2:
-            best = max(best, 78)
-        elif len(t_c) >= 6 and t_c in n_c:
+            continue
+        for nt in name_toks:
+            sc = _token_pair_score(t_c, nt)
+            if sc and (_is_generic_name_tok(t_c) or _is_generic_name_tok(nt)):
+                sc = min(sc, 68)
+            if sc and nt == primary:
+                sc = max(sc, 93)
+            best = max(best, sc)
+        if best < 70 and len(t_c) >= 8 and t_c in n_c:
             best = max(best, 60)
     return best
 
@@ -442,7 +602,7 @@ def _query_vault_hints(query):
 
 def match_vault_entries(query, limit=16, min_score=70):
     """
-    Ordner und .md-Dateien, deren *Name* zur Frage passt (Disk, kein Index).
+    Ordner und .md/.pdf-Dateien, deren *Name* zur Frage passt (Disk, kein Index).\n    Ordner namens Vorlagen werden nicht als Treffer geführt, Dateien darin schon.
 
     Liefert Liste {kind, path, title, score, vault} — path kanonisch /Vault/rel.
     Private Vaults ausgelassen. Versteckte/.obsidian/backups/Blocklist wie search_vault.
@@ -464,6 +624,10 @@ def match_vault_entries(query, limit=16, min_score=70):
     seen_d = set()
 
     def _add_folder(vault_name, rel, score, name):
+        leaf = (name or "").strip().lower()
+        rel_leaf = (rel or "").rstrip("/").rsplit("/", 1)[-1].lower()
+        if leaf == "vorlagen" or rel_leaf == "vorlagen":
+            return
         path = canon_vault_path(f"{vault_name}/{rel}" if rel else vault_name)
         if path in seen_d:
             if score > 0:
@@ -499,11 +663,16 @@ def match_vault_entries(query, limit=16, min_score=70):
             "excerpt": "",
         })
 
+    home_r = os.path.realpath(os.path.expanduser("~"))
     for vroot in vault_roots:
         vroot_r = os.path.realpath(vroot)
         if vroot_r in _priv:
             continue
         if not os.path.isdir(vroot_r):
+            continue
+        # Home als Vault-Wurzel ist Arbeitsplatz, kein Notiz-Baum.
+        # os.walk($HOME) macht die Ordner-Suche langsam und erzeugt Doppel-Pfade.
+        if vroot_r == home_r:
             continue
         vault_name = os.path.basename(vroot_r)
         vscore = name_match_score(q, vault_name)
@@ -534,9 +703,10 @@ def match_vault_entries(query, limit=16, min_score=70):
                 sc = name_match_score(q, dname)
                 if sc >= min_score:
                     _add_folder(vault_name, relroot.replace("\\", "/"), sc, dname)
-                    if sc >= 85:
+                    # Kein Dump aller Dateien in Vorlagen — Treffer nur per Dateiname.
+                    if sc >= 85 and (dname or "").strip().lower() != "vorlagen":
                         for fn in filenames:
-                            if not fn.endswith(".md") or fn.startswith("."):
+                            if fn.startswith(".") or not fn.lower().endswith((".md", ".pdf")):
                                 continue
                             child_rel = os.path.join(relroot, fn).replace("\\", "/")
                             try:
@@ -546,7 +716,7 @@ def match_vault_entries(query, limit=16, min_score=70):
                                 pass
                             _add_file(vault_name, child_rel, max(sc - 10, min_score), fn)
             for fn in filenames:
-                if not fn.endswith(".md") or fn.startswith("."):
+                if fn.startswith(".") or not fn.lower().endswith((".md", ".pdf")):
                     continue
                 stem, _ext = os.path.splitext(fn)
                 sc = max(name_match_score(q, stem), name_match_score(q, fn))
@@ -571,14 +741,14 @@ def match_vault_entries(query, limit=16, min_score=70):
 
     folders.sort(key=lambda r: (-r["score"], r["path"]))
     files.sort(key=lambda r: (-r["score"], r["path"]))
-    # Ordner zuerst, dann Dateien — Limit teilen, Ordner nicht komplett verdrängen
-    max_folders = min(6, limit)
-    out = folders[:max_folders] + files[: max(0, limit - min(len(folders), max_folders))]
+    # Dateien zuerst — der Treffer soll die Notiz/PDF sein, nicht der Elternordner.
+    max_files = min(10, limit)
+    out = files[:max_files] + folders[: max(0, limit - min(len(files), max_files))]
     log.log("match_vault_entries", query=q[:80], n=len(out), folders=len(folders), files=len(files))
     return out[:limit]
 
 
-def search_vault(query, limit=20):
+def search_vault(query, limit=20, roots=None):
     """
     Durchsucht alle .md-Dateien im Vault (case-insensitive).
 
@@ -597,6 +767,18 @@ def search_vault(query, limit=20):
     tokens = _tokenize_query(query)
     results = []
     vault_roots = [v for v in getattr(config, "VAULT_PATHS", [config.VAULT_PATH]) if v]
+    if roots is not None:
+        allow = set()
+        for raw in roots:
+            if not raw:
+                continue
+            try:
+                allow.add(os.path.realpath(raw))
+            except OSError:
+                allow.add(str(raw))
+        vault_roots = [v for v in vault_roots if os.path.realpath(v) in allow]
+        if not vault_roots:
+            return []
     try:
         from . import vaults_registry as _vr
 
@@ -862,6 +1044,8 @@ def create_note(path, content):
     Legt eine neue Notiz an. Weigert sich, wenn die Datei bereits existiert
     (kein Überschreiben!). Liefert {path, created: True} oder {path, exists: True}.
     """
+    if not str(content or "").strip():
+        raise ValueError("Leere Notiz verboten — Wachstum, kein Leeren")
     name = _safe_md_name(path)
     if not name:
         raise ValueError(f"Ungültiger Notizname: {path}")
@@ -916,8 +1100,10 @@ def apply_edit(path, new_content):
     Wendet eine Änderung NUR nach Backup + Revisionsnummer an.
     1) liest den aktuellen Inhalt  2) legt Backup an (R<n>)
     3) schreibt atomar (Temp-Datei + rename)
-    Weigert sich bei gleichem Inhalt. KEIN Löschen/Umbenennen.
+    Weigert sich bei gleichem Inhalt. KEIN Löschen/Umbenennen/Leeren.
     """
+    if not str(new_content or "").strip():
+        raise ValueError("Notiz leeren verboten — Wachstum, kein Löschen")
     current = read_note(path)
     resolved = _resolve_vault_path(path)
     if resolved is None:

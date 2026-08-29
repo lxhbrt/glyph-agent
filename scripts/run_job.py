@@ -20,6 +20,8 @@ ALIAS = {
     "hseq-aus-fertig-lernen": "td-lernen",
     "memory-hygiene": "td-memory",
     "memory": "td-memory",
+    "wiki-hygiene": "td-wiki-hygiene",
+    "wiki": "td-wiki-hygiene",
     "session-cleanup": "td-cleanup",
     "cleanup": "td-cleanup",
 }

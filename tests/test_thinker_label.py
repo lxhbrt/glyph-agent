@@ -13,12 +13,20 @@ from core import llm
 class ThinkerLabelTests(unittest.TestCase):
     def test_short_labels(self):
         self.assertEqual(llm.short_model_label("deepseek-v4-pro"), "DeepSeek v4 pro")
+        self.assertEqual(
+            llm.short_model_label("deepseek-v4-flash-vision-exp"),
+            "DeepSeek v4 vision",
+        )
         self.assertEqual(llm.short_model_label("deepseek-v4-flash"), "DeepSeek v4 flash")
         self.assertEqual(
             llm.short_model_label("deepseek/deepseek-v4-flash-0731"),
             "OpenRouter v4 flash",
         )
         self.assertEqual(llm.short_model_label(""), "?")
+        self.assertEqual(
+            llm.short_model_label("google/gemini-3.7-flash"),
+            "Gemini 3.7 flash",
+        )
 
     def test_agent_detail_uses_primary(self):
         detail = llm.thinker_step_detail("agent", model="deepseek-v4-pro")
@@ -34,7 +42,12 @@ class ThinkerLabelTests(unittest.TestCase):
 
     def test_code_detail(self):
         detail = llm.thinker_step_detail("code", model="deepseek-v4-flash")
-        self.assertEqual(detail, "DeepSeek CODE denkt (DeepSeek v4 flash)")
+        self.assertEqual(detail, "^_Code denkt (DeepSeek v4 flash)")
+
+    def test_code_gemini_detail(self):
+        detail = llm.thinker_step_detail("code", model="google/gemini-3.7-flash")
+        self.assertEqual(detail, "^_Code denkt (Gemini 3.7 flash)")
+        self.assertNotIn("DeepSeek", detail)
 
 
 if __name__ == "__main__":

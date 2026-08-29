@@ -2,8 +2,8 @@
 """
 Recherche-Policy (OpenClaw RECHERCHE.md → glyph-agent).
 
-  Grob  = Exa (WebSearch, source=exa)  — Übersicht, Snippets, schnell
-  Fein  = TinyFish (ExtractUrl / FetchUrl) — konkrete URL, strukturierte Daten
+  Suche = Exa + TinyFish parallel (WebSearch, source=both)
+  Fein  = TinyFish ExtractUrl / FetchUrl — konkrete URL
 
 Keine privaten Vault-Inhalte in Suchqueries. Reine Policy-Helfer, kein Netzwerk.
 """
@@ -23,8 +23,8 @@ COARSE_OK = True  # Default: grobe Suche wenn need_web
 def classify_web_depth(query: str) -> str:
     """
     Liefert 'fine' | 'coarse'.
-    fine  → TinyFish extract/fetch (oder WebSearch source=tinyfish als Zweitquelle)
-    coarse → Exa WebSearch
+    fine  → TinyFish extract/fetch bei konkreter URL
+    coarse → WebSearch (Exa + TinyFish)
     """
     q = (query or "").lower()
     for sig in FINE_SIGNALS:
@@ -42,14 +42,31 @@ def extract_urls(query: str):
 
 
 def default_web_source(query: str) -> str:
-    """source= für web_search: 'exa' (grob) oder 'tinyfish' (fein ohne URL)."""
-    return "tinyfish" if classify_web_depth(query) == "fine" and not extract_urls(query) else "exa"
+    """source= für web_search: immer beide (Exa + TinyFish)."""
+    return "both"
 
 
-def policy_prompt_snippet() -> str:
-    """Kurzer Text für System-Prompt."""
-    return (
-        "RECHERCHE: Exa = grobe Websuche (Übersicht). "
-        "TinyFish ExtractUrl/FetchUrl = feine Zielseite (konkrete URL oder gezielte Extraktion). "
+def policy_prompt_snippet(web=None) -> str:
+    """Kurzer Text für System-Prompt.
+
+    web: None = Jobs/Default; 'open' = ohne Apfel; 'apple' = Ordner-Suche an.
+    TinyFish + Exa immer.
+    """
+    base = (
+        "RECHERCHE: WebSearch = Exa und TinyFish parallel. "
+        "TinyFish ExtractUrl/FetchUrl = feine Zielseite (konkrete URL). "
         "Keine privaten Vault-Texte in Suchanfragen."
     )
+    if web == "open":
+        return (
+            base
+            + " Ordner-Suche aus: allgemeine Suche, Internet, soziale Netze. "
+            "Nicht den KomNet/DGUV-Pfad der Ordner-Suche."
+        )
+    if web == "apple":
+        return (
+            base
+            + " Ordner-Suche an: KomNet und DGUV. "
+            "Keine allgemeine Websuche, keine sozialen Netze."
+        )
+    return base

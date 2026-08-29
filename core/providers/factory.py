@@ -30,7 +30,7 @@ def _config_fallback(*attrs, default="deepseek/deepseek-v4-flash-0731"):
 
 def _make_direct():
     return DirectProvider(
-        model=getattr(config, "AGENT_OPENROUTER_MODEL", None) or "deepseek-v4-pro",
+        model=getattr(config, "AGENT_OPENROUTER_MODEL", None) or "deepseek-v4-flash-vision-exp",
         fallback_model=_config_fallback("AGENT_OPENROUTER_FALLBACK_MODEL"),
     )
 
@@ -38,13 +38,13 @@ def _make_direct():
 def _make_openrouter():
     mode = str(getattr(config, "MODE", "agent") or "agent").lower()
     if mode == "openrouter-chat":
-        primary = getattr(config, "OPENROUTER_MODEL", None) or "deepseek-v4-pro"
+        primary = getattr(config, "OPENROUTER_MODEL", None) or "deepseek-v4-flash-vision-exp"
         fb = _config_fallback("OPENROUTER_FALLBACK_MODEL")
     else:
         primary = (
             getattr(config, "AGENT_OPENROUTER_MODEL", None)
             or getattr(config, "OPENROUTER_MODEL", None)
-            or "deepseek-v4-pro"
+            or "deepseek-v4-flash-vision-exp"
         )
         fb = _config_fallback(
             "AGENT_OPENROUTER_FALLBACK_MODEL", "OPENROUTER_FALLBACK_MODEL"

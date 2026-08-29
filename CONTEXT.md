@@ -13,7 +13,7 @@ Lokale Engine hinter dem Glyph-Profil **glyph-agent**: Vault-Gedächtnis, Recher
 | Node | Tut | Quellen | Hängt an / produziert |
 |------|-----|---------|------------------------|
 | **HTTP** | `/chat`, `/health`, `/vault/find`, vaults/workspaces/recurring/tasks CRUD | `server.py` | alle Loops |
-| **Agent-Loop** | B+: VaultFind → Tools → Cloud-Denker. UI-Toggle: `vault_search` / `vault_selected` | `core/tool_loop.py`, `core/agent.py`, `core/vault_preview.py` | retrieval, research, vault_tools |
+| **Agent-Loop** | B+: VaultFind → Tools → Cloud-Denker. UI: `vault_search=false` = memory-wiki + offenes Web; Auswahl = Arbeits-Vault + Wiki | `core/tool_loop.py`, `core/agent.py`, `core/vault_preview.py`, `core/vault_scope.py` | retrieval, research, vault_tools |
 | **Vault-Schreiben** | Chat-Wachstum: CreateNote/ApplyEdit unter Themen/ + Wiki. Chat nie löschen/leeren. Job `td-wiki-hygiene` darf doppelt tote Wiki-Dateien in den 30-Tage-Korb. | `core/vault_write_policy.py`, `core/vault_tools.py`, `scripts/wiki_hygiene.py` | tool_loop, jobs |
 | **Code-Loop** | ^_Code: Read/Write/Grep/Shell; Freigabe Einmal/Auftrag/Task | `core/code_loop.py`, `core/code_tools.py` | `workspaces_registry`, Grant-Store |
 | **Tools-Registry** | Tool-Namen, Schemas, Dispatch | `core/tool_registry.py` | tool_loop / code_loop |
@@ -57,8 +57,8 @@ Ein nach außen sichtbares Finde-Werkzeug; intern hybrid Embedding + Keyword üb
 _Avoid_: VaultRecall, VaultSearch (Aliase, kein neuer Begriff)
 
 **Ordner-Suche**:
-Manueller Vault-Zugriff aus der UI (°_Agent-Toggle). `POST /vault/find` liefert Treffer ohne LLM. `/chat` mit `vault_search=false` überspringt Precheck und blockt VaultFind/ListVaultDir. `vault_selected` injiziert nur die gewählten Treffer. Ohne diese Felder bleibt B+ (Jobs). Vault leer: KomNet einmal (Exa+TinyFish, Domain komnet.nrw.de), sonst DGUV (dguv.de) — nur `/vault/find`, nicht B+-Precheck.
-_Avoid_: Vault-Suche bei jeder interaktiven °_Agent-Nachricht; HTML-Scrape der Zielseite; offene Websuche als Ordner-Suche-Fallback
+Manueller Arbeits-Vault-Zugriff aus der UI (°_Agent-Apfel). `POST /vault/find` liefert Treffer ohne LLM (Arbeits-Vault; leer → KomNet, sonst DGUV). `/chat` mit `vault_search=false`: memory-wiki + TinyFish/Exa + offenes Web, kein Arbeits-Vault, kein KomNet/DGUV-Pfad. `vault_selected`: gewählte Arbeits-Vault-/KomNet-/DGUV-Treffer plus memory-wiki. Ohne diese Felder bleibt B+ (Jobs). TinyFish und Exa immer.
+_Avoid_: Arbeits-Vault ohne Apfel; KomNet/DGUV ohne Apfel; Wiki hinter den Apfel; HTML-Scrape der Zielseite; offene Websuche als Apfel-Fallback
 
 **OpenRouter (Technik)**:
 Config- und Provider-Name der Cloud-API (`AGENT_PRIMARY_PROVIDER`, CONSTITUTION, Logs). **Kein** Glyph-UI-Profil, **keine** Nutzer-Sprache in der UI.
@@ -85,8 +85,8 @@ Benannte Arbeit, nicht die Chat-Session. Grant: `task_id`, Workspace-Root, Pfadp
 _Avoid_: Session-Grant; Chat als Scope; Prompt-Themenklassifikation; mit **Aufgabe** (Übergabe) verwechseln
 
 **Aufgabe**:
-Manuell übergebene Arbeit zwischen Köpfen. Speichert nur gewählte Belege (Meldung, Antwort, kompakter Trace, Anhang-Pfade) in `~/.glyph/tasks.json`. Zielkopf optional — Default leer, später zuweisen. Status `analysis` ist ein Workflow-Stand, kein Kopf. Neu braucht `pass` (Fertig-Kriterium). Status `done` nur mit `artifact`.
-_Avoid_: ganze Session übertragen; Vault-Inhalt mitkopieren; Analyse als Kopf; Recurring-To-do; automatischer Kopfwechsel; Fertig ohne Artefakt
+Manuell übergebene Arbeit zwischen Köpfen. Neu braucht `pass` und einen Beleg aus **Meldung + Antwort**. Speichert nur diesen Snapshot (plus kompakter Trace, Anhang-Pfade) in `~/.glyph/tasks.json`. Zielkopf optional. Status `analysis` ist Workflow, kein Kopf. Status `done` nur mit `artifact`.
+_Avoid_: Aufgabe ohne Meldung; Session-Zeiger; ganze Session; Vault-Inhalt; Analyse als Kopf; Recurring-To-do; Fertig ohne Artefakt
 
 **Änderungssatz**:
 Gesammelte Dateiänderungen, ein Gesamt-Diff, atomarer Apply nach Freigabe. Danach Tests; Fail → kein Commit.
@@ -144,8 +144,8 @@ _Avoid_: git commit in der Whitelist als stilles Allow
 
 - SoT: `~/.glyph/tasks.json` via `core/tasks.py` + HTTP `/tasks`.
 - Zielkopf optional. Default leer. Köpfe: `grok` · `_code` · `glyph-agent` · `codex`. **Kein** Kopf `analysis`.
-- Belege: Prompt, Antwort, kompakter Trace, Anhang-Metadaten (Pfad/Name) — keine Blobs, keine ganze Session.
-- `pass` Pflicht beim Anlegen. `done` nur mit `artifact` (Pfad/Ort). Chat-Belege sind Kontext, kein Abschluss.
+- Belege: Prompt, Antwort, kompakter Trace, Anhang-Metadaten (Pfad/Name) — keine Blobs, keine ganze Session, kein Session-Zeiger (°_Agent speichert keine Sessions).
+- Anlegen braucht `pass` **und** Meldung+Antwort. `done` nur mit `artifact` (Pfad/Ort). Chat-Belege sind Kontext, kein Abschluss. Alte Items ohne Paar laden weiter.
 - Prompt fordert: keine Build-Änderung ohne Nutzerauftrag; Rückfragen als Status `needs_input`.
 - Sichtbar im Glyph-Kalender Tab Plan; Übernehmen legt den Prompt in den Composer. Kein automatischer Kopfwechsel.
 

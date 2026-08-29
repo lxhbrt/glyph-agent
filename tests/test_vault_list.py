@@ -16,6 +16,45 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core import vault_tools, tool_registry, tool_loop, config
 
 
+FZ_STEM = "DGUV Information 209-007 Fahrzeuginstandhaltung"
+HL_STEM = "Handlungsleitfaden_DGUV_Vorschrift_BGHM"
+GB_STEM = "07_00 Muster-Gefaehrdungsbeurteilungen der BGHM"
+
+
+class DistinctivePdfNameScoreTests(unittest.TestCase):
+    """209-007 / Fahrzeuginstandhaltung schlaegt generisches DGUV/Handlungsleitfaden."""
+
+    def test_number_and_rare_word_beat_generic_dguv(self):
+        for q in ("209-007", "209", "007", "Fahrzeuginstandhaltung"):
+            fz = vault_tools.name_match_score(q, FZ_STEM)
+            hl = vault_tools.name_match_score(q, HL_STEM)
+            self.assertGreaterEqual(fz, 70, (q, fz))
+            self.assertGreater(fz, hl, (q, fz, hl))
+            self.assertLess(hl, 70, (q, hl))
+
+    def test_dguv_plus_209007_does_not_prefer_handlungsleitfaden(self):
+        q = "DGUV 209-007 Fahrzeuginstandhaltung"
+        fz = vault_tools.name_match_score(q, FZ_STEM)
+        hl = vault_tools.name_match_score(q, HL_STEM)
+        gb = vault_tools.name_match_score(q, GB_STEM)
+        self.assertGreaterEqual(fz, 70, fz)
+        self.assertGreater(fz, hl, (fz, hl))
+        self.assertLess(hl, 70, hl)
+        self.assertLess(gb, 70, gb)
+
+    def test_digit_tokens_kept_in_filename(self):
+        n_sp, n_c, _n_d = vault_tools._fold_name(FZ_STEM)
+        toks = [t for t in n_sp.split() if t]
+        self.assertIn("209", toks)
+        self.assertIn("007", toks)
+        self.assertIn("209007", n_c)
+
+    def test_krane_still_beats_vorlagen(self):
+        q = "Was ist in einem KFZ Betrieb zu Krane zu beachten, was muss vorliegen?"
+        self.assertGreaterEqual(vault_tools.name_match_score(q, "016_Krane"), 70)
+        self.assertLess(vault_tools.name_match_score(q, "Vorlagen"), 70)
+
+
 class TokenizeAndSearchTests(unittest.TestCase):
     def test_tokenize_keeps_date_drops_stopwords(self):
         toks = vault_tools._tokenize_query(
@@ -208,6 +247,75 @@ class MatchVaultNameTests(unittest.TestCase):
             any("sources" in (p or "").lower() or "unsafe-local" in (p or "").lower() for p in paths),
             paths,
         )
+
+    def test_sentence_hits_krane_pdf_not_folder_dump(self):
+        """Satzfrage: Dateiname-Token reicht; kein Vorlagen/Information-Dump."""
+        vorlagen = os.path.join(self.asi, "Arbeitssicherheit", "Vorlagen")
+        info = os.path.join(self.asi, "Arbeitssicherheit", "Information")
+        betrieb = os.path.join(self.asi, "Arbeitssicherheit", "Betriebssicherheit")
+        os.makedirs(vorlagen, exist_ok=True)
+        os.makedirs(info, exist_ok=True)
+        os.makedirs(betrieb, exist_ok=True)
+        with open(os.path.join(vorlagen, "016_Krane.pdf"), "wb") as f:
+            f.write(b"%PDF-1.4\n")
+        with open(os.path.join(betrieb, "00 MOC - Betriebssicherheit.md"), "w", encoding="utf-8") as f:
+            f.write("x\n")
+        with open(
+            os.path.join(info, "DGUV Information 209-007 Fahrzeuginstandhaltung.pdf"),
+            "wb",
+        ) as f:
+            f.write(b"%PDF-1.4\n")
+        for i in range(12):
+            with open(os.path.join(vorlagen, f"v-{i:02d}.md"), "w", encoding="utf-8") as f:
+                f.write("x\n")
+            with open(os.path.join(info, f"i-{i:02d}.md"), "w", encoding="utf-8") as f:
+                f.write("x\n")
+        q = "Was ist in einem KFZ Betrieb zu Krane zu beachten, was muss vorliegen?"
+        self.assertGreaterEqual(
+            vault_tools.name_match_score(q, "016_Krane"),
+            70,
+            "Satz muss 016_Krane treffen",
+        )
+        self.assertGreaterEqual(
+            vault_tools.name_match_score("Kran im KFZ", "016_Krane"),
+            70,
+            "kran muss krane treffen",
+        )
+        self.assertLess(
+            vault_tools.name_match_score(q, "Vorlagen"),
+            70,
+            "vorliegen darf Vorlagen nicht treffen",
+        )
+        hits = vault_tools.match_vault_entries(q)
+        files = [h["path"] for h in hits if h.get("kind") == "file"]
+        folders = [h["path"] for h in hits if h.get("kind") == "folder"]
+        self.assertTrue(
+            any(p.endswith("016_Krane.pdf") for p in files),
+            files,
+        )
+        self.assertTrue(
+            files and files[0].endswith("016_Krane.pdf"),
+            f"Krane nicht vorn: {files}",
+        )
+        self.assertFalse(
+            any(p.endswith("00 MOC - Betriebssicherheit.md") for p in files),
+            files,
+        )
+        self.assertFalse(
+            any((p or "").rstrip("/").endswith("/Vorlagen") for p in folders),
+            folders,
+        )
+        self.assertFalse(
+            any((p or "").rstrip("/").endswith("/Information") for p in folders),
+            folders,
+        )
+        dump = [
+            p
+            for p in files
+            if "/Information/" in p and not p.endswith("016_Krane.pdf")
+            and "Fahrzeuginstandhaltung" not in p
+        ]
+        self.assertEqual(dump, [], files)
 
 
 class RankingPrefersLiveOverArchive(unittest.TestCase):

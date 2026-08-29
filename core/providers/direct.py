@@ -4,7 +4,7 @@ DirectProvider — OpenAI-kompatibler Primär-Hop (DeepSeek, Grok, …).
 
 Kette (gegrillt 2026-08-12):
   1. DIRECT_API_URL + DIRECT_API_KEY (Alias: DEEPSEEK_API_KEY)
-     Modell ohne Slash = Direct-ID, z. B. deepseek-v4-pro
+     Modell ohne Slash = Direct-ID, z. B. deepseek-v4-flash-vision-exp
   2. Bei Ausfall: OpenRouter + OPENROUTER_API_KEY
      Modell mit Slash = OpenRouter-Slug, z. B. deepseek/deepseek-v4-flash-0731
 
@@ -80,17 +80,25 @@ class DirectProvider(OpenRouterProvider):
         """Direct-Primär → OpenRouter-Fallback. Setzt last_used / _active_model."""
         primary = self.model
         url, key, hop = self._hop_creds(primary)
+        # Google-400 „Requests ending with a model turn“: letzte Message muss user sein.
+        msgs = list(messages or [])
+        if msgs and str(msgs[-1].get("role") or "").lower() == "assistant":
+            msgs = msgs + [{"role": "user", "content": "Fortfahren."}]
         last_err = None
         if key:
             try:
                 text = self._chat_completion(
-                    messages,
+                    msgs,
                     temperature,
                     timeout=timeout,
                     model=primary,
                     url=url,
                     api_key=key,
                 )
+                if not text:
+                    raise RuntimeError(
+                        f"Modell '{primary}' lieferte eine leere Antwort (kein content)"
+                    )
                 self.last_used = hop
                 self._active_model = primary
                 return text
@@ -117,13 +125,17 @@ class DirectProvider(OpenRouterProvider):
             primary, last_err, fb, fb_hop,
         )
         text = self._chat_completion(
-            messages,
+            msgs,
             temperature,
             timeout=timeout,
             model=fb,
             url=fb_url,
             api_key=fb_key,
         )
+        if not text:
+            raise RuntimeError(
+                f"Fallback-Modell '{fb}' lieferte ebenfalls eine leere Antwort"
+            ) from last_err
         self.last_used = fb_hop
         self._active_model = fb
         return text

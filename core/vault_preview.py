@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """Manuelle Ordner-Suche: Trefferliste für den °_Agent-Toggle (kein LLM)."""
+import os
 import time
 
 from . import retrieval, vault_tools
@@ -9,6 +10,9 @@ _MAX_HITS = 12
 _EXCERPT = 240
 # Stay under glyph-ui.com Cloudflare HTTP timeout (100s) and UI proxy (90s).
 PREVIEW_BUDGET_S = 70
+# Disk-Namen zuerst zeigen. Index darf nachziehen, aber nicht die Liste blockieren.
+INDEX_WAIT_WITH_HITS_S = 4.0
+INDEX_WAIT_EMPTY_S = 20.0
 
 
 def preview_vault_hits(query, top_k=8, budget_s=None, now=None):
@@ -29,15 +33,34 @@ def preview_vault_hits(query, top_k=8, budget_s=None, now=None):
 
     files = []
     folders = {}
+    folder_by_disk = {}
     seen_files = set()
+    file_by_disk = {}
 
     def _put_folder(path, score):
         canon = vault_tools.canon_vault_path(path)
         if not canon or canon in (".", "/"):
             return
-        prev = folders.get(canon)
-        if prev is None or _score_val(score) > _score_val(prev.get("score")):
-            folders[canon] = _folder_hit(canon, score)
+        leaf = canon.rstrip("/").rsplit("/", 1)[-1].lower()
+        if leaf == "vorlagen":
+            return
+        disk = _disk_id(canon)
+        prev_key = folder_by_disk.get(disk)
+        if prev_key is not None:
+            prev = folders.get(prev_key)
+            keep = _prefer_canon(prev_key, canon)
+            if keep != prev_key:
+                folders.pop(prev_key, None)
+                hit = _folder_hit(canon, score)
+                if prev and _score_val(prev.get("score")) > _score_val(score):
+                    hit["score"] = prev.get("score")
+                folders[canon] = hit
+                folder_by_disk[disk] = canon
+            elif prev is not None and _score_val(score) > _score_val(prev.get("score")):
+                prev["score"] = score
+            return
+        folders[canon] = _folder_hit(canon, score)
+        folder_by_disk[disk] = canon
 
     def _put_file(hit):
         if not hit:
@@ -48,9 +71,19 @@ def preview_vault_hits(query, top_k=8, budget_s=None, now=None):
         hit = dict(hit)
         hit["path"] = canon
         hit["id"] = f"file:{canon}"
+        if not str(hit.get("excerpt") or "").strip():
+            hit["excerpt"] = _snip_excerpt(canon)
+        disk = _disk_id(canon)
+        if disk in file_by_disk:
+            i = file_by_disk[disk]
+            oldp = files[i].get("path") or ""
+            if _prefer_canon(oldp, canon) == canon:
+                files[i] = hit
+            return
         if canon in seen_files:
             return
         seen_files.add(canon)
+        file_by_disk[disk] = len(files)
         files.append(hit)
         parent = _parent_folder(canon)
         if parent:
@@ -78,7 +111,14 @@ def preview_vault_hits(query, top_k=8, budget_s=None, now=None):
         except Exception:
             return {"status": "empty", "results": []}
 
-    found = run_deadline(_vault_find, deadline, {"status": "empty", "results": []})
+    named_have = bool(named_folders or files)
+    remaining = deadline - time.monotonic()
+    if named_have:
+        index_wait = min(INDEX_WAIT_WITH_HITS_S, max(0.0, remaining))
+    else:
+        index_wait = min(INDEX_WAIT_EMPTY_S, max(0.0, remaining))
+    index_deadline = time.monotonic() + index_wait
+    found = run_deadline(_vault_find, index_deadline, {"status": "empty", "results": []})
     if not isinstance(found, dict):
         found = {"status": "empty", "results": []}
 
@@ -146,7 +186,7 @@ def preview_vault_hits(query, top_k=8, budget_s=None, now=None):
     )
     named_file_ids = {h.get("id") for h in named_files}
     other_files = [h for h in files if h.get("id") not in named_file_ids]
-    hits = top_folders + named_files + other_folders + named_first[4:] + other_files
+    hits = named_files + top_folders + other_folders + named_first[4:] + other_files
     hits = hits[:_MAX_HITS]
     fallback = None
     tried = []
@@ -170,6 +210,63 @@ def preview_vault_hits(query, top_k=8, budget_s=None, now=None):
         "fallback": fallback,
         "tried": tried,
     }
+
+
+def _snip_excerpt(path):
+    """Kurzer Notiz-Text für die Trefferliste, ohne LLM."""
+    if not str(path or "").lower().endswith(".md"):
+        return ""
+    try:
+        abs_p = vault_tools._resolve_vault_path(path)
+    except Exception:
+        abs_p = None
+    if not abs_p or not os.path.isfile(abs_p):
+        return ""
+    try:
+        with open(abs_p, encoding="utf-8", errors="replace") as fh:
+            raw = fh.read(2000)
+    except OSError:
+        return ""
+    body = raw
+    if body.startswith("---"):
+        end = body.find("\n---", 3)
+        if end != -1:
+            body = body[end + 4:]
+    body = " ".join(body.split())
+    if len(body) > _EXCERPT:
+        body = body[:_EXCERPT].rstrip() + "…"
+    return body
+
+
+
+def _disk_id(path):
+    """Gleiche Datei auf der Platte, egal welcher Vault-Pfad."""
+    try:
+        abs_p = vault_tools._resolve_vault_path(path)
+    except Exception:
+        abs_p = None
+    if abs_p:
+        try:
+            return "disk:" + os.path.realpath(abs_p)
+        except OSError:
+            pass
+    return "path:" + (vault_tools.canon_vault_path(path) or "")
+
+
+def _prefer_canon(a, b):
+    """Lieber /Fachvault/rel als /Benutzername/ObsidianVaults/..."""
+    def rank(p):
+        p = vault_tools.canon_vault_path(p) or ""
+        n = p.lstrip("/").split("/", 1)[0]
+        home = os.path.basename(os.path.expanduser("~"))
+        if n == home or "ObsidianVaults" in p:
+            return 2
+        if n:
+            return 0
+        return 1
+    if rank(b) < rank(a):
+        return b
+    return a
 
 
 def _score_val(score):

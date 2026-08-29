@@ -62,6 +62,28 @@ def test_code_override():
     assert snap["code"]["fallback"] is None
     assert snap["code"]["override"] is True
     assert config.CODE_OPENROUTER_MODEL == "b/code"
+    assert config.CODE_VISION_MODEL == "b/code"
+
+
+def test_apply_vision_sets_code_vision_model():
+    factory.reset_provider()
+    snap = runtime_models.apply_models(
+        {
+            "shared": {
+                "primary": "deepseek-v4-flash-vision-exp",
+                "fallback": "deepseek/deepseek-v4-flash-0731",
+            },
+            "code": {
+                "primary": "deepseek-v4-flash-vision-exp",
+                "fallback": "",
+            },
+        }
+    )
+    assert snap["shared"]["primary"] == "deepseek-v4-flash-vision-exp"
+    assert snap["code"]["primary"] == "deepseek-v4-flash-vision-exp"
+    assert config.CODE_OPENROUTER_MODEL == "deepseek-v4-flash-vision-exp"
+    assert config.CODE_VISION_MODEL == "deepseek-v4-flash-vision-exp"
+    assert os.environ.get("CODE_VISION_MODEL") == "deepseek-v4-flash-vision-exp"
 
 
 def test_apply_direct_url():
@@ -71,8 +93,33 @@ def test_apply_direct_url():
     assert snap["direct"]["url"] == "https://api.deepseek.com"
 
 
+def test_apply_direct_replaces_live_key():
+    """Graph-Schreiben muss den Singleton neu bauen — Mutieren reicht nicht."""
+    os.environ["DIRECT_API_KEY"] = "old-key-73c9"
+    os.environ["DIRECT_API_URL"] = "https://api.deepseek.com"
+    os.environ["OPENROUTER_API_KEY"] = "old-or-9199"
+    config.PROVIDER = "direct"
+    factory.reset_provider()
+    stale = factory.get_provider()
+    assert stale.provider_name == "direct"
+    assert stale.api_key == "old-key-73c9"
+
+    snap = runtime_models.apply_direct(
+        {"api_key": "new-key-3e4e", "openrouter_key": "new-or-0001"}
+    )
+    live = factory.get_provider()
+    assert live is not stale
+    assert live.api_key == "new-key-3e4e"
+    assert os.environ.get("DIRECT_API_KEY") == "new-key-3e4e"
+    assert os.environ.get("OPENROUTER_API_KEY") == "new-or-0001"
+    assert getattr(live, "_or_key", "") == "new-or-0001"
+    assert snap["direct"]["key_set"] is True
+
+
 if __name__ == "__main__":
     test_apply_shared_and_clear_fallback()
     test_code_override()
+    test_apply_vision_sets_code_vision_model()
     test_apply_direct_url()
+    test_apply_direct_replaces_live_key()
     print("ok")

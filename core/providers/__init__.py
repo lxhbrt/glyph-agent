@@ -37,4 +37,4 @@ class ModelProvider(ABC):
     @property
     @abstractmethod
     def model_name(self):
-        """Z. B. 'deepseek-v4-pro' oder Kette 'pro → flash-0731'."""
+        """Z. B. 'deepseek-v4-flash-vision-exp' oder Kette 'vision → flash-0731'."""

@@ -63,6 +63,19 @@ def normalize_prior_history(raw, current_message=None):
         if last == cur or last.endswith(cur) or cur.endswith(last):
             out = out[:-1]
 
+    # Alternanz erzwingen: nie zwei gleiche Rollen direkt nacheinander
+    # (OpenAI/OpenRouter-kompatibel — sonst HTTP 400 von manchen Modellen).
+    # Gleich-Rollen verschmelzen (Inhalt bleibt, kein Verlust).
+    merged = []
+    for item in out:
+        if merged and merged[-1]["role"] == item["role"]:
+            merged[-1]["content"] = (
+                merged[-1]["content"] + "\n\n" + item["content"]
+            )
+        else:
+            merged.append(dict(item))
+    out = merged
+
     # Von hinten: Message-Cap
     if len(out) > MAX_HISTORY_MESSAGES:
         out = out[-MAX_HISTORY_MESSAGES:]

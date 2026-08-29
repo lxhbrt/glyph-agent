@@ -27,6 +27,19 @@ class DraftEmitTests(unittest.TestCase):
         _maybe_emit_tool_reply_draft(events.append, "  ")
         self.assertEqual(events, [])
 
+    def test_pure_dsml_not_drafted(self):
+        events = []
+        raw = (
+            "<\uff5c\uff5cDSML\uff5c\uff5ctool_calls>"
+            '<\uff5c\uff5cDSML\uff5c\uff5cinvoke name="VaultFind">'
+            '<\uff5c\uff5cDSML\uff5c\uff5cparameter name="query" string="true">Kran'
+            "</\uff5c\uff5cDSML\uff5c\uff5cparameter>"
+            "</\uff5c\uff5cDSML\uff5c\uff5cinvoke>"
+            "</\uff5c\uff5cDSML\uff5c\uff5ctool_calls>"
+        )
+        _maybe_emit_tool_reply_draft(events.append, raw)
+        self.assertEqual(events, [])
+
 
 if __name__ == "__main__":
     unittest.main()

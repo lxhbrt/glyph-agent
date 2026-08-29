@@ -40,8 +40,8 @@ _LEGACY_SEED = [
         "primary": False,
     },
     {
-        "name": "OpenClaw memory-wiki",
-        "path": os.path.join(OBSIDIAN_ROOT, "OpenClaw memory-wiki"),
+        "name": "memory-wiki",
+        "path": os.path.join(OBSIDIAN_ROOT, "memory-wiki"),
         "mode": "rw",
         "primary": False,
     },

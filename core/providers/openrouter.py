@@ -3,7 +3,7 @@
 OpenRouterProvider — Cloud-Modell über OpenRouter.
 
 Kette (B+):
-  1. Primär: config AGENT_OPENROUTER_MODEL (Default deepseek-v4-pro)
+  1. Primär: config AGENT_OPENROUTER_MODEL (Default deepseek-v4-flash-vision-exp)
   2. Fallback: AGENT_OPENROUTER_FALLBACK_MODEL (Default deepseek/deepseek-v4-flash-0731)
 
 Kein lokaler Chat-Fallback. Ohne API-Key: harter Fehler.
@@ -33,22 +33,87 @@ from .. import config as _cfg
 log = logging.getLogger("glyph-agent.openrouter")
 
 
+def _part_text(part):
+    """Text aus einem Content-Part (OpenAI / Gemini / OpenRouter)."""
+    if part is None:
+        return ""
+    if isinstance(part, str):
+        return part
+    if not isinstance(part, dict):
+        return str(part)
+    ptype = str(part.get("type") or "").lower()
+    if "encrypted" in ptype:
+        return ""
+    for key in ("text", "content", "reasoning", "thought"):
+        val = part.get(key)
+        if isinstance(val, str) and val.strip():
+            return val
+    return ""
+
+
 def _message_text(data):
-    """Finaler Antworttext aus einer Chat-Completions-Antwort."""
-    msg = ((data or {}).get("choices") or [{}])[0].get("message") or {}
+    """Finaler Antworttext aus einer Chat-Completions-Antwort.
+
+    Behandelt auch native OpenAI/OpenRouter `tool_calls` (Gemini liefert bei langem
+    Kontext oft `finish_reason: tool_calls` OHNE content-Text): diese werden in das
+    JSON-Format `{"tool": ..., "args": ...}` übersetzt, das try_parse_tool_call
+    versteht — sonst gingen sie als „leere Antwort“ verloren.
+
+    Gemini 3.x über OpenRouter legt den Nutztext oft in `reasoning` statt
+    `content` / `reasoning_content`. Ohne diese Felder stirbt ^_Code mit
+    „leere Antwort“, obwohl der HTTP-Call 200 war.
+    """
+    choice = ((data or {}).get("choices") or [{}])[0] or {}
+    msg = choice.get("message") or {}
     content = msg.get("content")
     if isinstance(content, list):
-        parts = []
-        for p in content:
-            if isinstance(p, dict):
-                parts.append(str(p.get("text") or p.get("content") or ""))
-            elif p is not None:
-                parts.append(str(p))
-        content = "".join(parts)
+        content = "".join(_part_text(p) for p in content)
     text = str(content or "").strip()
     if text:
         return text
-    return str(msg.get("reasoning_content") or "").strip()
+    # Native tool_calls (finish_reason=tool_calls) -> JSON-Text für den Tool-Loop.
+    tcs = msg.get("tool_calls") or []
+    if tcs:
+        parts = []
+        for tc in tcs:
+            fn = (tc or {}).get("function") or {}
+            name = str(fn.get("name") or "").strip()
+            args_raw = fn.get("arguments") or ""
+            args = {}
+            if isinstance(args_raw, dict):
+                args = args_raw
+            else:
+                try:
+                    parsed = json.loads(args_raw) if str(args_raw).strip() else {}
+                    args = parsed if isinstance(parsed, dict) else {}
+                except Exception:
+                    args = {}
+            if name:
+                parts.append(
+                    json.dumps({"tool": name, "args": args}, ensure_ascii=False)
+                )
+        if parts:
+            return "\n".join(parts)
+    for blob in (
+        msg.get("reasoning_content"),
+        msg.get("reasoning"),
+        msg.get("thought"),
+        choice.get("reasoning"),
+        choice.get("text"),
+    ):
+        t = str(blob or "").strip()
+        if t:
+            return t
+    details = msg.get("reasoning_details") or choice.get("reasoning_details") or []
+    if isinstance(details, list):
+        harvested = []
+        for d in details:
+            t = _part_text(d)
+            if t:
+                harvested.append(t)
+        if harvested:
+            return "\n".join(harvested).strip()
+    return ""
 
 
 def _resolve_chat_timeout(timeout=None):
@@ -136,11 +201,11 @@ class OpenRouterProvider(ModelProvider):
         self.api_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
         if getattr(_cfg, "MODE", "agent") == "agent":
             default_model = getattr(_cfg, "AGENT_OPENROUTER_MODEL", None) or os.environ.get(
-                "AGENT_OPENROUTER_MODEL", "deepseek-v4-pro"
+                "AGENT_OPENROUTER_MODEL", "deepseek-v4-flash-vision-exp"
             )
         else:
             default_model = getattr(_cfg, "OPENROUTER_MODEL", None) or os.environ.get(
-                "OPENROUTER_MODEL", "deepseek-v4-pro"
+                "OPENROUTER_MODEL", "deepseek-v4-flash-vision-exp"
             )
         self.model = model or default_model
         # Fallback hinter dem Primärmodell (Direct/OR-Slug → OpenRouter Flash-0731).
@@ -273,6 +338,21 @@ class OpenRouterProvider(ModelProvider):
                 raise TimeoutError(
                     f"OpenRouter chat timeout nach {wall}s (model={m}): {e}"
                 ) from e
+            if isinstance(e, urllib.error.HTTPError):
+                # Body einbetten, sonst sieht man nur „400 Bad Request“ ohne Grund.
+                try:
+                    ebody = e.read().decode("utf-8", errors="replace")[:600]
+                except Exception:
+                    ebody = ""
+                log.error(
+                    "HTTP %s bei Modell '%s': %s",
+                    e.code, m, ebody or e.reason,
+                )
+                if ebody:
+                    raise RuntimeError(
+                        f"HTTP {e.code} {e.reason} von Modell '{m}': {ebody}"
+                    ) from e
+                raise e
             if isinstance(e, urllib.error.URLError):
                 reason = getattr(e, "reason", e)
                 if isinstance(reason, socket.timeout) or "timed out" in str(e).lower():
@@ -282,15 +362,43 @@ class OpenRouterProvider(ModelProvider):
             raise e
 
         data = box["data"] or {}
-        return _message_text(data)
+        text = _message_text(data)
+        # Leere Completion ist KEIN Erfolg: das Modell hat nichts Sinnvolles geliefert
+        # (z. B. nur reasoning_content oder leerer content), obwohl der HTTP-Call ok war.
+        # Als Fehler klassifizieren, damit _with_free_fallback auf das Fallback-Modell
+        # wechselt statt eine hängende/leere Antwort nach oben zu reichen.
+        if not text:
+            log.warning(
+                "Leere Antwort von Modell '%s' (provider=%s) — als Fehler behandelt",
+                m, self.provider_name,
+            )
+            try:
+                _agent_log.log(
+                    "cloud_empty",
+                    provider=self.provider_name,
+                    model=m,
+                    timeout=wall,
+                )
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"Modell '{m}' lieferte eine leere Antwort (kein content)"
+            )
+        return text
 
     def _with_free_fallback(self, messages, temperature, timeout=None):
         """Primär → Free. Setzt last_used / _active_model.
         Ohne API-Key kein Free-Versuch (gleicher Key, gleicher Fail)."""
         self._ensure_key()
+        # Wasserdicht gegen Google-400 „Requests ending with a model turn“:
+        # egal welcher Aufrufer (chat/chat_messages/generate), die letzte Message
+        # muss user sein. Kopie, damit der Aufrufer-Liste nichts mutiert wird.
+        msgs = list(messages or [])
+        if msgs and str(msgs[-1].get("role") or "").lower() == "assistant":
+            msgs = msgs + [{"role": "user", "content": "Fortfahren."}]
         try:
             text = self._chat_completion(
-                messages, temperature, timeout=timeout, model=self.model
+                msgs, temperature, timeout=timeout, model=self.model
             )
             self.last_used = "openrouter"
             self._active_model = self.model
@@ -305,6 +413,11 @@ class OpenRouterProvider(ModelProvider):
             text = self._chat_completion(
                 messages, temperature, timeout=timeout, model=self.fallback_model
             )
+            if not text:
+                raise RuntimeError(
+                    f"Fallback-Modell '{self.fallback_model}' lieferte ebenfalls "
+                    "eine leere Antwort"
+                ) from e1
             self.last_used = "openrouter:free"
             self._active_model = self.fallback_model
             return text.rstrip() + (

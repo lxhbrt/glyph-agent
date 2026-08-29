@@ -7,7 +7,7 @@ nie direkt einen Provider. Dadurch bleibt das Modell austauschbar, ohne dass
 an der Agenten-/Tool-Schicht etwas geändert wird:
 
     core/llm.chat() / core/llm.generate()
-        -> providers.get_provider()  (Direct Pro/Flash → OpenRouter Flash-0731)
+        -> providers.get_provider()  (Direct Vision-Exp → OpenRouter Flash-0731)
             -> konkretes Modell
 
 Die tatsächliche Provider-Implementierung liegt in core/providers/*.
@@ -22,17 +22,28 @@ def get_provider():
 
 
 def short_model_label(model_id):
-    """Nutzerlabel für Think-Steps: Pro / Direct-Flash / OpenRouter-Flash."""
+    """Nutzerlabel für Think-Steps: Vision-Exp / Pro / Direct-Flash / OpenRouter-Flash."""
     mid = str(model_id or "").strip()
     if not mid:
         return "?"
     low = mid.lower()
+    if "vision" in low and "deepseek" in low:
+        return "DeepSeek v4 vision"
     if "deepseek-v4-pro" in low:
         return "DeepSeek v4 pro"
     if "deepseek-v4-flash-0731" in low:
         return "OpenRouter v4 flash" if "/" in mid else "DeepSeek v4 flash"
     if "deepseek-v4-flash" in low:
         return "OpenRouter v4 flash" if "/" in mid else "DeepSeek v4 flash"
+    if "gemini" in low:
+        name = mid.split("/")[-1].split(":")[0]
+        rest = name.lower()
+        for prefix in ("google-gemini-", "gemini-"):
+            if rest.startswith(prefix):
+                rest = rest[len(prefix):]
+                break
+        rest = rest.replace("gemini", "").replace("-", " ").strip()
+        return f"Gemini {rest}".strip() if rest else "Gemini"
     name = mid.split("/")[-1]
     return name.split(":")[0] or mid
 
@@ -43,10 +54,10 @@ def thinker_step_detail(kind="agent", model=None):
 
     kind = (kind or "agent").lower()
     if kind == "code":
-        configured = getattr(config, "CODE_OPENROUTER_MODEL", "deepseek-v4-flash")
-        prefix = "DeepSeek CODE"
+        configured = getattr(config, "CODE_OPENROUTER_MODEL", "deepseek-v4-flash-vision-exp")
+        prefix = "^_Code"
     else:
-        configured = getattr(config, "AGENT_OPENROUTER_MODEL", "deepseek-v4-pro")
+        configured = getattr(config, "AGENT_OPENROUTER_MODEL", "deepseek-v4-flash-vision-exp")
         prefix = "Cloud-Denker"
     used = model
     if not used:

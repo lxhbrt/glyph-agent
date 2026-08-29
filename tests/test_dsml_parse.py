@@ -104,6 +104,25 @@ class DsmlParseTests(unittest.TestCase):
         self.assertTrue(tr.looks_like_dsml(_SCREENSHOT))
         self.assertTrue(tr.looks_like_dsml(_FULLWIDTH))
 
+    def test_double_fullwidth_vaultfind_live_leak(self):
+        """glyph-ui.com: <｜｜DSML｜｜ (zwei U+FF5C) VaultFind — muss Tool werden, nicht Chat."""
+        raw = (
+            "<\uff5c\uff5cDSML\uff5c\uff5ctool_calls>\n"
+            '<\uff5c\uff5cDSML\uff5c\uff5cinvoke name="VaultFind">\n'
+            '<\uff5c\uff5cDSML\uff5c\uff5cparameter name="query" string="true">'
+            "Kranbetrieb Kranführer Hebezeug Lastaufnahmemittel KFZ Werkstatt Prüfung"
+            "</\uff5c\uff5cDSML\uff5c\uff5cparameter>\n"
+            "</\uff5c\uff5cDSML\uff5c\uff5cinvoke>\n"
+            "</\uff5c\uff5cDSML\uff5c\uff5ctool_calls>"
+        )
+        self.assertTrue(tr.looks_like_dsml(raw))
+        r = tr.try_parse_tool_call(raw)
+        self.assertIsNotNone(r)
+        name, args = r
+        self.assertEqual(name, "VaultFind")
+        self.assertIn("Kranbetrieb", args.get("query") or "")
+        self.assertEqual(tr.prose_before_dsml(raw), "")
+
     def test_native_parameter_close_without_slash(self):
         """Live-Leak: Parameter endet mit <||DSML||parameter>, nicht </…>."""
         raw = (

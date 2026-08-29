@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Provider-Selbsttest — Direct Pro → OpenRouter Flash, kein lokaler Chat.
+Provider-Selbsttest — Direct Vision-Exp → OpenRouter Flash, kein lokaler Chat.
 
 Aufruf:
     python3 tests/test_providers.py
@@ -108,8 +108,8 @@ def main():
     p = load("openrouter")
     check("provider_name == 'openrouter'", p.provider_name == "openrouter", f"-> {p.provider_name}")
     check(
-        "Primär-Modell DeepSeek Pro",
-        "deepseek-v4-pro" in (p.model or ""),
+        "Primär-Modell DeepSeek Vision-Exp",
+        "deepseek-v4-flash-vision-exp" in (p.model or ""),
         f"-> {getattr(p, 'model', p.model_name)}",
     )
     try:
@@ -172,12 +172,16 @@ def main():
     check("deepseek-v4-pro ist Direct-ID", uses_openrouter_slug("deepseek-v4-pro") is False)
     check("OR-Slug erkannt", uses_openrouter_slug("deepseek/deepseek-v4-flash-0731") is True)
 
-    print("\n[3c] factory-Default ohne Env: Direct Pro → OpenRouter Flash-0731:")
+    print("\n[3c] factory-Default ohne Env: Direct Vision-Exp → OpenRouter Flash-0731:")
     os.environ.pop("AGENT_OPENROUTER_MODEL", None)
     os.environ.pop("AGENT_OPENROUTER_FALLBACK_MODEL", None)
     os.environ["DIRECT_API_KEY"] = "test-direct"
     p = load("direct", {"MODE": "agent", "AGENT_PRIMARY_PROVIDER": "direct"})
-    check("Default-Primär deepseek-v4-pro", p.model == "deepseek-v4-pro", f"-> {p.model}")
+    check(
+        "Default-Primär deepseek-v4-flash-vision-exp",
+        p.model == "deepseek-v4-flash-vision-exp",
+        f"-> {p.model}",
+    )
     check(
         "Default-Fallback Flash-0731",
         p.fallback_model == "deepseek/deepseek-v4-flash-0731",

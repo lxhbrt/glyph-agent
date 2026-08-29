@@ -68,7 +68,9 @@ TOOLS = [
             "Für Inventar-Fragen ('was liegt im Eingang?', 'welche Dateien in Fertig?'). "
             "Pfad relativ zu einem Vault, optional mit Vault-Präfix "
             "(z.B. '00 Arbeitsfluss/Eingang' oder 'HSEQ Sync/00 Arbeitsfluss/Eingang'). "
-            "Leer/'.' = Top-Level aller Vaults. Kein Ersatz für VaultFind (Inhaltssuche)."
+            "Index-Pfade mit führendem Slash ('/HSEQ Sync/Themen') gelten gleich — "
+            "das ist kein Dateisystem-Root. Leer/'.' = Top-Level aller Vaults. "
+            "Kein Ersatz für VaultFind (Inhaltssuche)."
         ),
         "args": {
             "path": "str (optional, Default '.')",
@@ -98,7 +100,10 @@ TOOLS = [
     },
     {
         "name": "CreateNote",
-        "description": "Legt eine NEUE Notiz an (überschreibt nie Bestehendes).",
+        "description": (
+            "Legt eine NEUE Notiz an (überschreibt nie Bestehendes). "
+            "Chat: Themen/ und Wiki concepts|entities|syntheses|sources. Nie leer."
+        ),
         "args": {"path": "str", "content": "str"},
         "write": True,
     },
@@ -110,14 +115,18 @@ TOOLS = [
     },
     {
         "name": "ApplyEdit",
-        "description": "Wendet eine BESTÄTIGTE Änderung an (Backup + Revision). Nur nach Nutzer-Bestätigung.",
+        "description": (
+            "Ergänzt/ändert eine Notiz (Backup + Revision). "
+            "Chat ohne Popup: Themen/ und Wiki concepts|entities|syntheses. "
+            "Nie löschen, nie leeren, nie Eingang/Sources umschreiben."
+        ),
         "args": {"path": "str", "new_content": "str, kompletter neuer Inhalt"},
         "write": True,
     },
     {
         # OpenClaw-Wiki-Alias → ApplyEdit (write + confirm)
         "name": "WikiApply",
-        "description": "Alias für ApplyEdit (OpenClaw-Wiki). Braucht Nutzer-Bestätigung.",
+        "description": "Alias für ApplyEdit. Gleich: Wachstum, kein Löschen.",
         "args": {"path": "str", "new_content": "str, kompletter neuer Inhalt"},
         "write": True,
     },
@@ -133,10 +142,23 @@ TOOLS = [
     {
         "name": "WebSearch",
         "description": (
-            "Grobe Web-Recherche (Standard: Exa). NUR anonymisierte Suchbegriffe. "
-            "source=tinyfish nur als Zweitquelle. Für konkrete URLs: ExtractUrl/FetchUrl/BrowseUrl."
+            "Web-Recherche: Exa und TinyFish parallel (source=both). NUR anonymisierte Suchbegriffe. "
+            "Für konkrete URLs: ExtractUrl/FetchUrl/BrowseUrl."
         ),
-        "args": {"query": "str, anonymisierter Suchbegriff", "count": "int (optional)", "source": "str (optional: 'exa' oder 'tinyfish')"},
+        "args": {
+            "query": "str, anonymisierter Suchbegriff",
+            "count": "int (optional)",
+            "source": "str (optional: 'both' | 'exa' | 'tinyfish')",
+        },
+        "write": False,
+    },
+    {
+        "name": "DeepResearch",
+        "description": (
+            "Autonome Multi-Agenten Swarm-Recherche. Dekomponiert komplexe Themen, "
+            "sucht parallel über Quellen, extrahiert Claims und erstellt einen B+-Belegbericht."
+        ),
+        "args": {"topic": "str, Thema oder Fragestellung für Deep Research"},
         "write": False,
     },
     {
@@ -163,8 +185,11 @@ TOOLS = [
     {
         "name": "ReadPdf",
         "description": (
-            "Liest Text aus einer PDF-Datei im Vault (pdftotext CLI, graceful wenn fehlt). "
-            "Nur Vault-Pfade; Zeichen-Cap."
+            "Liest Text aus einer PDF-Datei im Vault. Erlaubt: Lesen. "
+            "Kein Ingest, kein Schreiben. Nur Vault-Pfade; Zeichen-Cap. "
+            "Nach Vault-Listing oder Suche sofort die 1–2 PDFs lesen, "
+            "deren Dateiname zur Frage passt. Niemals den Nutzer fragen, "
+            "welche Datei zu öffnen."
         ),
         "args": {"path": "str, vault-relativer .pdf-Pfad", "max_chars": "int (optional)"},
         "write": False,
@@ -264,7 +289,7 @@ CODE_TOOLS = [
         "name": "WriteFile",
         "description": (
             "Schreibt/überschreibt eine Datei (kompletter Inhalt) mit Backup. "
-            "Unter Workspace-Mode r+w ohne Popup. Kein Löschen."
+            "Unter r+w: stagen, Apply nach Freigabe (Einmal/Auftrag/Task). Kein Löschen."
         ),
         "args": {"path": "str", "content": "str, kompletter neuer Dateiinhalt"},
         "write": True,
@@ -273,7 +298,7 @@ CODE_TOOLS = [
         "name": "SearchReplace",
         "description": (
             "Ersetzt old→new exakt einmal in einer Datei (1 Treffer Pflicht). "
-            "Backup wie WriteFile. Unter r+w ohne Popup."
+            "Backup wie WriteFile. Unter r+w: stagen, Apply nach Freigabe."
         ),
         "args": {"path": "str", "old": "str, exakter bisheriger Text", "new": "str, Ersatz"},
         "write": True,
@@ -281,9 +306,10 @@ CODE_TOOLS = [
     {
         "name": "RunCommand",
         "description": (
-            "Shell im Workspace (r+w). Whitelist (git status/add/commit, npm test, pytest, ls…) "
-            "ohne Popup. Elevated (git push/pull/fetch, Compound/&&/|, npm run service:*) "
-            "braucht Glyph-Freigabe. Hart verboten: rm/sudo/…."
+            "Shell im Workspace (r+w). Lesen (git status/diff, ls) ohne Popup. "
+            "Test/Build/Commit/Install brauchen Freigabe. Elevated "
+            "(git push/pull/fetch, Compound, npm run service:*) immer Einmal. "
+            "Hart verboten: rm/sudo/…."
         ),
         "args": {
             "command": "str",
@@ -313,10 +339,13 @@ def tool_map(mode="agent"):
     return TOOL_MAP
 
 
-def tool_schema_prompt(mode="agent"):
+def tool_schema_prompt(mode="agent", exclude=None):
     """Erzeugt die Tool-Beschreibung für den System-Prompt des Modells."""
+    skip = {str(x) for x in (exclude or []) if x}
     lines = ['Verfügbare Werkzeuge (antworte mit JSON {"tool": Name, "args": {...}}):']
     for t in tools_for_mode(mode):
+        if t["name"] in skip:
+            continue
         args = ", ".join(f"{k}:{v}" for k, v in t["args"].items())
         lines.append(f"- {t['name']}({args}) — {t['description']}")
     return "\n".join(lines)
@@ -492,10 +521,28 @@ def execute(tool_name, args, confirm=None, mode="agent", allow_elevated=False):
 
     try:
         if mode == "code":
-            return _execute_code(tool_name, args or {}, allow_elevated=allow_elevated)
-        return _execute_agent(tool_name, args or {})
+            out = _execute_code(tool_name, args or {}, allow_elevated=allow_elevated)
+        else:
+            out = _execute_agent(tool_name, args or {})
     except Exception as e:
         return {"ok": False, "result": None, "error": str(e)}
+    if tool_name == "ReadPdf":
+        return _propagate_inner_ok(out)
+    return out
+
+
+def _propagate_inner_ok(out):
+    """Inneres {ok:false} nicht als Tool-Erfolg wrappen."""
+    if not isinstance(out, dict) or out.get("ok") is not True:
+        return out
+    inner = out.get("result")
+    if isinstance(inner, dict) and inner.get("ok") is False:
+        return {
+            "ok": False,
+            "result": inner,
+            "error": inner.get("error") or out.get("error") or "Tool fehlgeschlagen",
+        }
+    return out
 
 
 def _execute_agent(tool_name, args):
@@ -536,11 +583,18 @@ def _execute_agent(tool_name, args):
         res = vault_tools.wiki_status()
         return {"ok": True, "result": res}
     if tool_name == "WebSearch":
-        res = web.web_search(
-            args.get("query", ""),
-            count=int(args.get("count", 5)),
-            source=args.get("source", "exa"),
-        )
+        kwargs = {
+            "query": args.get("query", ""),
+            "count": int(args.get("count", 5)),
+            "source": args.get("source", "both"),
+        }
+        if args.get("include_domains"):
+            kwargs["include_domains"] = args.get("include_domains")
+        res = web.web_search(**kwargs)
+        return {"ok": True, "result": res}
+    if tool_name in ("DeepResearch", "SwarmResearch"):
+        from . import swarm
+        res = swarm.run_swarm(args.get("topic", ""))
         return {"ok": True, "result": res}
     if tool_name == "ExtractUrl":
         res = web.extract_tinyfish(args.get("url", ""), args.get("goal", ""))

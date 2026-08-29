@@ -179,6 +179,9 @@ def create_item(payload: dict) -> dict:
         raise ValueError("Aufgabe braucht einen Titel")
     if not item.get("pass"):
         raise ValueError("Aufgabe braucht ein Fertig-Kriterium")
+    ev = item.get("evidence") or {}
+    if not (ev.get("prompt") or "").strip() or not (ev.get("answer") or "").strip():
+        raise ValueError("Aufgabe braucht Meldung und Antwort")
     _require_finish(item)
     item["events"] = [{"at": now, "type": "created", "by": item["source"], "text": "Aufgabe übergeben"}]
     data = _load()

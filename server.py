@@ -14,7 +14,7 @@ die Tool-Orchestrierung nutzen kann, ohne die Agentenlogik selbst zu tragen.
   POST /jobs/run    -> Legacy; neu: POST /recurring/<id>/run
 
   GET    /recurring              Liste wiederkehrender To-dos (+ Migration)
-  POST   /recurring              Anlegen {title,prompt,schedule,allow_write,paused}
+  POST   /recurring              Anlegen {title,prompt,schedule,allow_write,paused,pass?}
   PATCH  /recurring/<id>         Update
   DELETE /recurring/<id>         Löschen
   POST   /recurring/<id>/run     {force?: true} einmal / fällig
@@ -62,6 +62,8 @@ from core import jobs as agent_jobs
 from core import recurring as agent_recurring
 from core import vaults_registry as agent_vaults
 from core import workspaces_registry as agent_workspaces
+from core import code_grants as agent_grants
+from core import tasks as agent_tasks
 
 PORT = int(os.environ.get("GLYPH_AGENT_PORT", "18899"))
 HOST = os.environ.get("GLYPH_AGENT_HOST", "127.0.0.1")
@@ -281,12 +283,12 @@ def _handle_chat(payload, send=None):
         from core import llm as _llm
         system = (
             "Du bist glyph-agent (reiner Chat-Modus). Cloud-Denker: "
-            "deepseek-v4-pro (Direct), Fallback OpenRouter "
+            "deepseek-v4-flash-vision-exp (Direct), Fallback OpenRouter "
             "deepseek/deepseek-v4-flash-0731. Kein Tiny/Free. "
             "Du hast KEINEN Zugriff auf Dateien, einen Vault, Tools oder das Internet. "
             "Antworte nur aus deinem eigenen Wissen. "
             "Bei Modell-Fragen: nenne das aktive Runtime-Modell "
-            "(Primär deepseek-v4-pro, sonst OpenRouter Flash-0731), kein Wiki/Tool nötig."
+            "(Primär deepseek-v4-flash-vision-exp, sonst OpenRouter Flash-0731), kein Wiki/Tool nötig."
         )
         try:
             from core import history as chat_history
@@ -328,9 +330,33 @@ def _handle_chat(payload, send=None):
                 return True
         return False
 
+    def confirm_agent(tool_name, args):
+        from core import vault_write_policy
+
+        if vault_write_policy.allow_chat_write(tool_name, args):
+            return True
+        return confirm(tool_name, args)
+
     def on_event(event):
         if send:
             send(event)
+
+    # Composer-Swarm (°_Agent / ^_Code): Planer → Suche → Synthese, kein Chat-Loop.
+    if (payload or {}).get("swarm"):
+        from core import swarm as swarm_mod
+        result = swarm_mod.run_swarm(message, on_event=on_event)
+        p = llm.get_provider()
+        used_model = getattr(p, "_active_model", None) or p.model_name
+        result = {
+            "used_provider": p.provider_name,
+            "used_model": used_model,
+            "mode": "swarm",
+            "pending_confirmation": False,
+            **result,
+        }
+        if send:
+            send({"type": "done", **result})
+        return result
 
     # --- CODE-Modus (^_Code): DeepSeek + Workspace-Tools, kein Vault ---
     if req_mode == "code":
@@ -347,6 +373,8 @@ def _handle_chat(payload, send=None):
             allow_pending=allow_pending,
             images=images,
             conversation_history=conversation_history,
+            grant_scope=(payload or {}).get("grant_scope"),
+            grant_spec=(payload or {}).get("grant_spec"),
         )
         p = llm.get_provider()
         used_model = (
@@ -368,12 +396,20 @@ def _handle_chat(payload, send=None):
         return result
 
     # Agentenmodus: kontrollierter Tool-Loop mit Bestätigung für Schreib-Tools.
+    vault_search = (payload or {}).get("vault_search")
+    if vault_search is not None:
+        vault_search = bool(vault_search)
+    vault_selected = None
+    if "vault_selected" in (payload or {}):
+        vault_selected = _normalize_vault_selected((payload or {}).get("vault_selected"))
     result = tool_loop.run(
         message,
-        confirm=confirm,
+        confirm=confirm_agent,
         on_event=on_event,
         images=images,
         conversation_history=conversation_history,
+        vault_search=vault_search,
+        vault_selected=vault_selected,
     )
     # Modell-Info anhängen (Primär Luna oder Free-Fallback).
     p = llm.get_provider()
@@ -388,7 +424,6 @@ def _handle_chat(payload, send=None):
     if send:
         send({"type": "done", **result})
     return result
-
 
 
 def _normalize_vault_selected(raw, limit=12):
@@ -554,6 +589,19 @@ def main():
                     self._send(200, agent_workspaces.public_snapshot())
                 except Exception as e:
                     self._send(500, {"ok": False, "error": str(e)})
+            elif path in ("/tasks", "/tasks/"):
+                self._send(200, {"ok": True, "items": agent_tasks.list_items()})
+            elif path.startswith("/tasks/") and path.rstrip("/").endswith("/prompt"):
+                item_id = path.rstrip("/").split("/")[-2]
+                try:
+                    self._send(200, {"ok": True, "prompt": agent_tasks.handoff_prompt(item_id)})
+                except ValueError as e:
+                    self._send(404, {"ok": False, "error": str(e)})
+            elif path in ("/code/grants", "/code/grants/"):
+                try:
+                    self._send(200, agent_grants.public_snapshot())
+                except Exception as e:
+                    self._send(500, {"ok": False, "error": str(e)})
             elif path in ("/recurring", "/recurring/"):
                 try:
                     mig = agent_recurring.ensure_migrated()
@@ -599,6 +647,21 @@ def main():
 
         def do_PATCH(self):
             path = self.path.split("?", 1)[0]
+            if path.startswith("/tasks/") and path.count("/") == 2:
+                item_id = path.rstrip("/").split("/")[-1]
+                payload, err = _read_json_body(self)
+                if err:
+                    self._send(400, {"error": err, "ok": False})
+                    return
+                try:
+                    self._send(200, {"ok": True, "item": agent_tasks.update_item(item_id, payload or {})})
+                except ValueError as e:
+                    msg = str(e)
+                    code = 404 if "nicht gefunden" in msg.lower() else 400
+                    self._send(code, {"ok": False, "error": msg})
+                except OSError as e:
+                    self._send(500, {"ok": False, "error": f"Aufgabe nicht speicherbar: {e}"})
+                return
             if path.startswith("/vaults/") and path.count("/") >= 2:
                 parts = path.rstrip("/").split("/")
                 # /vaults/<id> or /vaults/<id>/pins
@@ -707,6 +770,18 @@ def main():
 
         def do_POST(self):
             path = self.path.split("?", 1)[0]
+            if path in ("/tasks", "/tasks/"):
+                payload, err = _read_json_body(self)
+                if err:
+                    self._send(400, {"error": err, "ok": False})
+                    return
+                try:
+                    self._send(200, {"ok": True, "item": agent_tasks.create_item(payload or {})})
+                except ValueError as e:
+                    self._send(400, {"ok": False, "error": str(e)})
+                except OSError as e:
+                    self._send(500, {"ok": False, "error": f"Aufgabe nicht speicherbar: {e}"})
+                return
             if path in ("/vaults", "/vaults/"):
                 payload, err = _read_json_body(self)
                 if err:
@@ -748,6 +823,22 @@ def main():
                     except Exception as e:
                         self._send(500, {"ok": False, "error": str(e)})
                     return
+            if path in ("/code/grants/close-task", "/code/grants/close-task/"):
+                try:
+                    ok = agent_grants.close_task()
+                    self._send(200, {"ok": True, "closed": ok, **agent_grants.public_snapshot()})
+                except Exception as e:
+                    self._send(500, {"ok": False, "error": str(e)})
+                return
+            if path.startswith("/code/grants/") and path.rstrip("/").endswith("/revoke"):
+                parts = path.rstrip("/").split("/")
+                gid = parts[-2] if len(parts) >= 3 else ""
+                try:
+                    ok = agent_grants.revoke(gid)
+                    self._send(200, {"ok": True, "revoked": ok, **agent_grants.public_snapshot()})
+                except Exception as e:
+                    self._send(500, {"ok": False, "error": str(e)})
+                return
             if path in ("/workspaces", "/workspaces/"):
                 payload, err = _read_json_body(self)
                 if err:

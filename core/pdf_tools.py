@@ -34,25 +34,9 @@ def _resolve_pdf_path(path):
     if not path or not str(path).strip():
         raise ValueError("ReadPdf: path fehlt")
     raw = str(path).strip()
-    # resolve ohne .md-Zwang
-    vault_roots = [os.path.realpath(v) for v in getattr(config, "VAULT_PATHS", [config.VAULT_PATH])]
-    if os.path.isabs(raw):
-        cand = os.path.realpath(raw)
-        for v in vault_roots:
-            if cand == v or cand.startswith(v + os.sep):
-                resolved = cand
-                break
-        else:
-            raise ValueError(f"Pfad außerhalb der Vaults: {path}")
-    else:
-        resolved = None
-        for v in vault_roots:
-            cand = os.path.realpath(os.path.join(v, raw))
-            if cand == v or cand.startswith(v + os.sep):
-                resolved = cand
-                break
-        if resolved is None:
-            raise ValueError(f"Pfad außerhalb der Vaults: {path}")
+    resolved = vault_tools._resolve_vault_path(raw)
+    if not resolved:
+        raise ValueError(vault_tools._outside_vault_error(raw))
 
     rel = vault_tools._rel_to_root(resolved)
     if vault_tools._is_blocked(rel):
@@ -83,10 +67,7 @@ def read_pdf(path, max_chars=None):
             "chars": 0,
             "truncated": False,
             "engine": None,
-            "error": (
-                "pdftotext nicht gefunden (poppler). "
-                "Install: brew install poppler — dann ReadPdf erneut."
-            ),
+            "error": "PDF-Text nicht lesbar (Extraktion nicht verfügbar).",
         }
 
     try:

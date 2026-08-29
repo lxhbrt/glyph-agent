@@ -17,6 +17,15 @@ _BINDING_KEYS = (
 )
 _BINDING_SETTINGS = ("DIRECT_API_URL", "GLYPH_AGENT_URL")
 
+# Direkt-Hop-Variablen, für die die Graph-Einstellung (Glyph-UI bindings.json)
+# den .env-Wert ersetzen DARF (überschreibt statt nur leere Slots zu füllen).
+# Grund: Der User stellt URL/Key über den Graphen ein; ein veralteter .env-Wert
+# (z. B. api.deepseek.com) darf nicht gegen die Absicht gewinnen und mit einem
+# OpenRouter-Key (sk-or-…) gegen die DeepSeek-URL 401 erzeugen.
+# Siehe memory 2026-08-16: „Graph-API-Einstellung wird von glyph-agent ignoriert“.
+_BINDING_OVERWRITE_SETTINGS = ("DIRECT_API_URL",)
+_BINDING_OVERWRITE_KEYS = ("DIRECT_API_KEY", "OPENROUTER_API_KEY")
+
 
 def load_dotenv(path=None):
     if path is None:
@@ -62,12 +71,24 @@ def load_ui_bindings(path=None):
             val = str(keys.get(kid) or "").strip()
         if not val:
             val = str(data.get(kid) or "").strip()
-        if val and not str(os.environ.get(kid) or "").strip():
-            os.environ[kid] = val
-            loaded = True
+        overwrite = kid in _BINDING_OVERWRITE_KEYS
+        if overwrite:
+            if val:
+                os.environ[kid] = val
+                loaded = True
+        else:
+            if val and not str(os.environ.get(kid) or "").strip():
+                os.environ[kid] = val
+                loaded = True
     for sid in _BINDING_SETTINGS:
         val = str(settings.get(sid) or data.get(sid) or "").strip()
-        if val and not str(os.environ.get(sid) or "").strip():
-            os.environ[sid] = val
-            loaded = True
+        overwrite = sid in _BINDING_OVERWRITE_SETTINGS
+        if overwrite:
+            if val:
+                os.environ[sid] = val
+                loaded = True
+        else:
+            if val and not str(os.environ.get(sid) or "").strip():
+                os.environ[sid] = val
+                loaded = True
     return loaded
